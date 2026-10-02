@@ -5,16 +5,21 @@ description: tauri2-template 的前后端通信指南。说明 invoke 与 #[taur
 
 # IPC 通信（前端 ↔ Rust）
 
-本项目前后端唯一通信方式是 Tauri v2 IPC。两条路径：**command**（前端主动调用，请求-响应）与 **event**（双向广播，无返回值）。
+本项目前后端唯一通信方式是 Tauri v2 IPC。两条路径：**command**（前端主动调用，请求-响应）与 **event**（Rust/前端之间的广播，无返回值）。页面不直接散落裸 `invoke`，而是通过 typed service facade 和统一事件 helper。
 
-现有链路：
+当前链路：
 
 ```
-index.html (#greet-form)
-    └── src/main.ts: invoke("greet", { name })
-        └── [IPC + capabilities ACL 校验]
-            └── lib.rs: #[tauri::command] fn greet(name: &str) -> String
-                └── 注册点: invoke_handler(generate_handler![greet])
+src/pages/* 或 src/components/*
+    └── src/services/*.ts: invokeCommand<T>(name, args)
+        └── src/api/tauri.ts: runtime 检测 + AppError 规范化
+            └── commands/*.rs: #[tauri::command]
+                └── lib.rs: generate_handler![commands::...]
+
+Rust worker / tray / child window
+    └── src-tauri/src/events.rs: app.emit(event, payload)
+        └── src/api/events.ts: listenEvent / safeListen
+            └── 页面保存 unlisten，并在 cleanup 时释放
 ```
 
 ---
@@ -25,18 +30,37 @@ index.html (#greet-form)
 
 | # | 位置 | 内容 | 漏掉的后果 |
 |---|------|------|-----------|
-| 1 | `lib.rs` | `#[tauri::command] fn my_cmd(...)` | 前端报 command not found |
-| 2 | `lib.rs` | `generate_handler![greet, my_cmd]` | **Rust 编译通过**，前端运行时报 not found |
-| 3 | `main.ts` | `invoke("my_cmd", {...})` | 功能不可用 |
+| 1 | `commands/*.rs` | `#[tauri::command] pub fn my_cmd(...)` | 前端报 command not found |
+| 2 | `lib.rs` | `generate_handler![commands::...::my_cmd]` | **Rust 编译通过**，前端运行时报 not found |
+| 3 | `services/*.ts` | `invokeCommand<T>("my_cmd", {...})` | 页面没有可用 facade |
 
-**第 2 步没有任何编译期保护**，是本项目最高频的错误来源。写完 command 立刻检查注册列表。
+**第 2 步没有任何编译期保护**，是本项目最高频的错误来源。写完 command 立刻检查 [src-tauri/src/lib.rs](../../../src-tauri/src/lib.rs) 的注册列表。
 
 调用名是 **Rust 函数名的字符串形式**，不是文件名、不是模块路径：
 
 ```rust
-// lib.rs
+// src-tauri/src/commands/app.rs
 #[tauri::command]
-fn load_config() -> String { /* ... */ }
+pub fn get_app_info(app: AppHandle) -> AppResult<AppInfo> { /* ... */ }
+```
+
+```ts
+// src/services/app.ts
+await invokeCommand<AppInfo>("get_app_info"); // ✅
+await invokeCommand<AppInfo>("getAppInfo");  // ❌ 找不到
+```
+
+模块拆分后 `generate_handler!` 里写完整路径，但前端调用名仍是**函数名**：
+
+```rust
+.invoke_handler(tauri::generate_handler![
+    commands::app::get_app_info,
+    commands::storage::get_storage_stats,
+])
+```
+
+```ts
+await invokeCommand<StorageStats>("get_storage_stats"); // 不带模块前缀
 ```
 
 ```ts
@@ -183,14 +207,32 @@ const unlisten = await listen<number>("progress", (event) => {
 unlisten();
 ```
 
-前端也可发射给 Rust（`emit` from `@tauri-apps/api/event`），Rust 侧用 `app.listen()` 接收。
+本项目的实际封装：
+
+```rust
+// src-tauri/src/events.rs
+pub fn emit_subprocess_exit(app: &AppHandle, payload: SubprocessExitPayload) -> AppResult<()> {
+    app.emit(&format!("subprocess:exit:{}", payload.id), payload)?;
+    Ok(())
+}
+```
+
+```ts
+// src/api/events.ts
+const unlisten = await listenEvent<ProcessExit>(eventName, handler);
+// page cleanup 时调用 unlisten()
+```
+
+子窗口、subprocess、tray、time event 的名称集中在 [src/shared/events.ts](../../../src/shared/events.ts)；动态事件名必须由同一个 helper 生成。`safeListen` 在浏览器 runtime 或监听失败时返回 no-op cleanup，页面仍要保存它。
 
 要点：
 
 - `AppHandle` 作为 command 参数时**不占用前端调用签名**，前端仍只传业务参数。
-- `emit` 广播到所有窗口；只发给特定窗口用 `window.emit()`（`Emitter` trait）。
-- 事件名建议集中成常量，避免两侧字符串写错 —— 与 command 名一样没有编译期校验。
-- **长期监听必须保存并调用 `unlisten`**，尤其在框架组件卸载时。
+- `emit` 广播到所有窗口；事件 payload 字段由 Rust `serde` 决定。
+- 事件名没有编译期校验，集中管理并在两侧维护同名契约。
+- **长期监听必须保存并调用 `unlisten`**，尤其在 page/router cleanup 时。
+- 子进程等高频事件只传有界行/状态；完整快照通过 command 拉取，不要把无限日志塞进 event。
+
 
 ---
 
@@ -257,10 +299,13 @@ await listen("progress", handler);     // 没保存 unlisten → 泄漏
 
 ## 9. 与其他层的协调
 
-- command 的定义、错误类型、async 写法见 `.claude/skills/tauri2-rust-backend/SKILL.md`。
-- 前端侧的 DOM 绑定与 strict 陷阱见 `.claude/skills/tauri2-frontend/SKILL.md`。
-- 插件 API 的权限授权见 `.claude/skills/tauri2-config-permissions/SKILL.md`。
-- 本项目**没有**自动生成的 bindings（不同于 Wails），Rust 类型与 TS 类型需人工同步。新增复杂结构体时建议在前端建一个 `src/types.ts` 集中声明，避免散落在各处的内联类型逐渐漂移。
+- command 的定义、错误类型、async 写法见 [tauri2-rust-backend](../tauri2-rust-backend/SKILL.md)。
+- 前端 Shell、页面 cleanup、service facade 见 [tauri2-vanilla-app-architecture](../tauri2-vanilla-app-architecture/SKILL.md)。
+- 基础 DOM/Vite/strict 规则见 [tauri2-frontend](../tauri2-frontend/SKILL.md)。
+- 插件 API、CSP 和 capability 授权见 [tauri2-config-permissions](../tauri2-config-permissions/SKILL.md)。
+- child window/tray/dialog 的具体事件语义见 [tauri2-desktop-integration](../tauri2-desktop-integration/SKILL.md)。
+- subprocess 的 ready/stdout/stderr/exit 顺序和快照见 [tauri2-subprocess-lifecycle](../tauri2-subprocess-lifecycle/SKILL.md)。
+- 本项目**没有**自动生成 bindings（不同于 Wails），Rust 类型与 TS 类型需人工同步；集中维护在 [src/contracts/types.ts](../../../src/contracts/types.ts)，不要让页面散落内联结构体逐渐漂移。
 
 ## 官方 references
 

@@ -5,7 +5,7 @@ description: tauri2-template 的前端开发指南。说明 Vanilla TS 无框架
 
 # 前端层（Vanilla TS + Vite）
 
-本项目前端刻意**不带框架**：无 React/Vue、无路由、无状态库。重心在 Rust 侧，UI 只是薄壳。
+本项目前端仍刻意**不带框架**，但已经不是单一表单壳：使用 `AppShell + Router + Store + Services + Pages` 组织多页面工作台。复杂的页面生命周期、主题、i18n 和 service 组合见 [tauri2-vanilla-app-architecture](../tauri2-vanilla-app-architecture/SKILL.md)，本 skill 保留 Vanilla TS、Vite 和 strict 基础规则。
 
 ---
 
@@ -17,50 +17,51 @@ description: tauri2-template 的前端开发指南。说明 Vanilla TS 无框架
 ├── vite.config.ts      # 端口 1420 固定 + 忽略 src-tauri
 ├── tsconfig.json       # strict + bundler 解析
 └── src/
-    ├── main.ts         # 唯一入口脚本：invoke + DOM 绑定
-    ├── styles.css
-    └── assets/         # svg 等静态资源
+    ├── main.ts         # 主窗口/child bootstrap
+    ├── api/             # invoke/event/runtime facade
+    ├── components/      # AppShell、Sidebar、TitleBar
+    ├── contracts/       # Rust/TS 手工同步类型
+    ├── i18n/            # zh-CN/en-US/auto
+    ├── pages/           # home/settings/x-pro/subprocess/child
+    ├── router/          # key-based Router
+    ├── services/        # typed command、dialog、window、tray facade
+    ├── store/           # 轻量 app state
+    ├── theme/           # CSS token 与系统主题
+    ├── shared/          # DOM、事件、滚动 helper
+    └── styles.css
 ```
 
-注意 `index.html` 在**根目录**而非 `src/`，这是 Vite 的约定。`tsconfig.json` 的 `include` 只有 `["src"]`，所以 `vite.config.ts` 本身不被 `tsc` 检查（它里面那行 `@ts-expect-error` 就是因此保留的）。
+注意 `index.html` 在**根目录**而非 `src/`，这是 Vite 的约定。`tsconfig.json` 的 `include` 只有 `["src"]`，所以 `vite.config.ts` 本身不被 `tsc` 检查。
 
 ---
 
-## 2. DOM 绑定模式
+## 2. DOM 绑定与 mount/cleanup 模式
 
-现有写法（[src/main.ts](../../../src/main.ts)）：先声明模块级变量，在 `DOMContentLoaded` 里查询并绑定。
+当前页面不是在 `DOMContentLoaded` 中全局查询一次元素，而是由 Router 挂载到独立 host。页面 mount 时渲染自己的 DOM、绑定事件和启动异步工作，并返回 cleanup：
 
 ```ts
-import { invoke } from "@tauri-apps/api/core";
+export const mountPage = (container: HTMLElement, props: Props): Cleanup => {
+  let disposed = false;
+  container.innerHTML = `<section class="page">...</section>`;
+  const cleanupClick = on(container, "click", handleClick);
 
-let greetInputEl: HTMLInputElement | null;
-let greetMsgEl: HTMLElement | null;
-
-async function greet() {
-  if (greetMsgEl && greetInputEl) {          // ← strict 下必须判空
-    greetMsgEl.textContent = await invoke("greet", {
-      name: greetInputEl.value,
-    });
-  }
-}
-
-window.addEventListener("DOMContentLoaded", () => {
-  greetInputEl = document.querySelector("#greet-input");
-  greetMsgEl = document.querySelector("#greet-msg");
-  document.querySelector("#greet-form")?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    greet();
-  });
-});
+  return () => {
+    disposed = true;
+    cleanupClick();
+    container.replaceChildren();
+  };
+};
 ```
 
 要点：
 
-- `querySelector` 返回 `T | null`，strict 下**必须**判空或用 `?.`，否则编译失败。
-- 表单提交必须 `e.preventDefault()`，否则 webview 会尝试导航，页面白屏。
-- 泛型可省掉手动断言：`document.querySelector<HTMLInputElement>("#greet-input")`。
+- 每个页面自己管理 listener、event unlisten、timer、observer 和异步竞态。
+- cleanup 前先设置 `disposed`，promise 回调必须检查它。
+- 通过 `qs<T>` 获取元素并判空；不要假定 route host 一定存在。
+- 页面只调用 typed service facade，不在模板事件里散落裸 `invoke`。
+- 用户输入、路径、错误 detail 进入 `innerHTML` 前必须 `escapeHtml`；纯文本优先 `textContent`。
 
-新增交互时保持同一模式：DOM 元素集中在 `DOMContentLoaded` 里取，业务函数单独定义。
+Router 的 keep-alive、Service/Contract 分层、主题和 i18n 细节见 [tauri2-vanilla-app-architecture](../tauri2-vanilla-app-architecture/SKILL.md)。
 
 ---
 
@@ -110,23 +111,27 @@ server: {
 
 ## 5. 调用后端
 
-只通过 `invoke`。详细规则见 `.claude/skills/tauri2-ipc/SKILL.md`，此处只记前端侧要点：
+页面通过 typed service facade 调用后端；service 再统一经过 [src/api/tauri.ts](../../../src/api/tauri.ts) 的 `invokeCommand<T>`。详细 wire contract 见 [tauri2-ipc](../tauri2-ipc/SKILL.md)：
 
 ```ts
-import { invoke } from "@tauri-apps/api/core";
+// src/services/app.ts
+import { invokeCommand } from "../api/tauri";
 
-// 给返回值加类型，避免 unknown 扩散
-const msg = await invoke<string>("greet", { name: "world" });
-
-// 可能失败的 command 必须捕获
-try {
-  const content = await invoke<string>("read_file", { path: "a.txt" });
-} catch (err) {
-  console.error(err);   // Rust 返回 Err 时走这里
-}
+export const AppService = {
+  greet(name: string): Promise<string> {
+    return invokeCommand<string>("greet", { name });
+  },
+};
 ```
 
-**不要**直接用 `window.__TAURI__`。虽然 [tauri.conf.json](../../../src-tauri/tauri.conf.json#L13) 的 `withGlobalTauri: true` 让它可用，但走 ESM import 有类型检查，全局对象没有。
+前端要点：
+
+- 给返回值加明确泛型，避免 `unknown` 扩散。
+- 可能失败的 command 必须 `try/catch` 或 promise `.catch`，并通过 `toDisplayError` 显示。
+- 长期事件监听保存并调用 unlisten；页面 cleanup 不能遗漏。
+- `isTauriRuntime()` 为 false 时，IPC facade 返回明确 runtime error，浏览器预览不要伪造成功。
+
+`tauri.conf.json` 当前 `withGlobalTauri: false`，不要依赖 `window.__TAURI__`；统一使用 ESM import 和 facade。
 
 ---
 
@@ -208,9 +213,11 @@ form.addEventListener("submit", () => { greet(); });   // 缺 e.preventDefault()
 
 ## 9. 与其他层的协调
 
-- `invoke` 的参数命名转换、返回值类型、错误处理详见 `.claude/skills/tauri2-ipc/SKILL.md`。
-- 端口改动需同步 `tauri.conf.json`，窗口尺寸等配置见 `.claude/skills/tauri2-config-permissions/SKILL.md`。
-- 前端产物目录 `dist/` 由 `tauri.conf.json` 的 `frontendDist: "../dist"` 指向，改 Vite 的 `build.outDir` 必须同步改它。
+- `invoke`、event、错误和 Rust/TS contract 见 [tauri2-ipc](../tauri2-ipc/SKILL.md)。
+- Shell、Router、Store、Services、页面 cleanup、主题和 i18n 见 [tauri2-vanilla-app-architecture](../tauri2-vanilla-app-architecture/SKILL.md)。
+- child window、tray、dialog、titlebar 见 [tauri2-desktop-integration](../tauri2-desktop-integration/SKILL.md)。
+- 端口改动需同步 `tauri.conf.json`，窗口和 capability 配置见 [tauri2-config-permissions](../tauri2-config-permissions/SKILL.md)。
+- 前端产物目录 `dist/` 由 `tauri.conf.json` 的 `frontendDist: "../dist"` 指向，改 Vite 的 `build.outDir` 必须同步它。
 - `dist/` 已被 [.gitignore](../../../.gitignore#L11) 忽略，不要提交。
 
 ## 官方 references

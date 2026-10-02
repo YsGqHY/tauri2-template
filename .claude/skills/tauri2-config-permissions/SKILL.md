@@ -19,9 +19,8 @@ Tauri v2 把"应用配置"和"能力授权"分成两套文件：
 ```json
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri2-template",
-  "version": "0.1.0",
-  "identifier": "com.tauri2template.dev",
+  "productName": "Foundation Desktop",
+  "identifier": "com.foundation.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -29,9 +28,17 @@ Tauri v2 把"应用配置"和"能力授权"分成两套文件：
     "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": true,
-    "windows": [{ "title": "tauri2-template", "width": 800, "height": 600 }],
-    "security": { "csp": null }
+    "withGlobalTauri": false,
+    "windows": [{
+      "title": "Foundation Desktop",
+      "width": 1280, "height": 800,
+      "minWidth": 960, "minHeight": 600,
+      "decorations": false, "resizable": true
+    }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'self'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 ws://127.0.0.1:1420; object-src 'none'; frame-src 'none'; base-uri 'self'"
+    }
   },
   "bundle": { "active": true, "targets": "all", "icon": [...] }
 }
@@ -45,8 +52,8 @@ Tauri v2 把"应用配置"和"能力授权"分成两套文件：
 | `build.frontendDist` | 生产构建读取的前端产物目录 | 改 Vite `build.outDir` 须同步 |
 | `build.beforeDevCommand` | `tauri dev` 前自动执行 | 换包管理器时要改（当前 pnpm） |
 | `app.windows[]` | 窗口初始属性 | 运行时改窗口用 Rust API，不改这里 |
-| `app.security.csp` | 内容安全策略 | 当前 `null` = 关闭，见第 5 节 |
-| `app.withGlobalTauri` | 是否注入 `window.__TAURI__` | 当前 `true`，见第 5 节 |
+| `app.security.csp` | 内容安全策略 | 当前生产 CSP 已启用，开发另有 `devCsp`，见第 5 节 |
+| `app.withGlobalTauri` | 是否注入 `window.__TAURI__` | 当前 `false`，前端统一使用 ESM import，见第 5 节 |
 | `bundle.targets` | 打包格式 | `"all"` 出全部格式，可收窄提速 |
 
 `$schema` 指向官方 schema，在 VS Code 里能获得字段补全与校验。**不要删**。
@@ -73,22 +80,42 @@ Tauri v2 把"应用配置"和"能力授权"分成两套文件：
 
 v1 用 `allowlist` 在 `tauri.conf.json` 里开关 API；**v2 改成 capabilities ACL**，粒度更细且按窗口隔离。
 
-本项目当前权限：
+本项目主窗口权限：
 
 ```json
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-start-dragging",
+    "dialog:default"
+  ]
 }
 ```
 
-含义：名为 `main` 的窗口获得 `core:default` 与 `opener:default` 两组权限。
+含义：主窗口获得基础 IPC、窗口控制和 dialog 能力。当前 `tauri-plugin-opener` 已不在主窗口 capability 中使用，不能把旧的 `opener:default` 示例当成实际权限。
 
-- `core:default` — Tauri 核心能力基础集（含 IPC，**自定义 command 靠它工作**）
-- `opener:default` — `tauri-plugin-opener` 的默认权限集
+动态 child 窗口另有 [src-tauri/capabilities/children.json](../../../src-tauri/capabilities/children.json)：
+
+```json
+{
+  "identifier": "children",
+  "windows": ["child-*"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging"
+  ]
+}
+```
+
+`core:default` 覆盖自定义 command 的基础 IPC；插件 API 和窗口 API 仍需显式列出。child capability 的通配符和动态 label 需要真实 Tauri 窗口验证。
 
 `$schema` 指向的 `../gen/schemas/desktop-schema.json` 由 `build.rs` 在构建时生成，本项目已存在（`gen/schemas/` 下有 4 个文件）。它使编辑器能补全权限标识符。`gen/schemas` 已被 [src-tauri/.gitignore](../../../src-tauri/.gitignore#L7) 忽略，属生成物。
 
@@ -108,7 +135,6 @@ pnpm tauri add fs
 ```rust
 // 2. lib.rs 注册插件
 tauri::Builder::default()
-    .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_fs::init())        // ← 新增
 ```
 
@@ -117,7 +143,6 @@ tauri::Builder::default()
 {
   "permissions": [
     "core:default",
-    "opener:default",
     "fs:default"
   ]
 }
@@ -137,7 +162,6 @@ tauri::Builder::default()
 {
   "permissions": [
     "core:default",
-    "opener:default",
     {
       "identifier": "fs:allow-read-text-file",
       "allow": [{ "path": "$APPDATA/myapp/*" }]
@@ -159,45 +183,74 @@ pnpm tauri inspect permissions      # 查看当前生效的权限
 
 ---
 
-## 5. 两个默认值的安全影响
+## 5. 当前 CSP 与 global API 安全边界
 
-本模板为开发便利保留了两个宽松默认值，**生产前应重新评估**：
-
-### CSP 为 null
-
-```json
-"security": { "csp": null }
-```
-
-关闭了内容安全策略。开发期方便（Vite 的 HMR、内联脚本都不受限），但意味着 webview 不限制脚本来源。**接入任何远程内容、CDN 资源、或渲染用户输入的 HTML 之前必须配置 CSP**：
+本项目已经启用生产 CSP，并为 Vite HMR 单独提供 `devCsp`：
 
 ```json
 "security": {
-  "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'"
+  "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'self'",
+  "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1420 ws://127.0.0.1:1420; object-src 'none'; frame-src 'none'; base-uri 'self'"
 }
 ```
 
-纯本地应用风险相对低，但一旦有 `<iframe>`、外链、或把远程数据插入 `innerHTML`，缺 CSP 就是 XSS 直通车 —— 而 Tauri 应用里的 XSS 可以调用已授权的所有 command，危害远大于普通网页。
+生产 CSP 只允许本地资源、Tauri IPC 和 data/blob 图片；不应随意加入 CDN、任意远程脚本、iframe 或宽泛 `connect-src`。`style-src 'unsafe-inline'` 是当前 Vanilla TS 模板为动态 CSS/主题保留的取舍，接入远程内容前必须重新评估。
 
-### withGlobalTauri 为 true
+`withGlobalTauri` 当前为 `false`：
 
 ```json
-"withGlobalTauri": true
+"withGlobalTauri": false
 ```
 
-向 webview 注入全局 `window.__TAURI__`。便利但扩大攻击面：任何注入的脚本都能直接拿到它调 IPC。若前端统一走 ESM import（本项目 [src/main.ts](../../../src/main.ts#L1) 已是如此），**建议改为 `false`**。
-
-改为 `false` 后 `window.__TAURI__` 不再存在，只能 `import { invoke } from "@tauri-apps/api/core"`，类型检查也更好。
+前端统一使用 ESM import（`@tauri-apps/api/core`、`@tauri-apps/api/event`、插件包）和 facade，不依赖 `window.__TAURI__`。这降低全局注入面，也让 TypeScript 能检查调用。
 
 ---
 
 ## 6. 多窗口的权限隔离
 
+capabilities 按窗口 label 生效。当前主窗口和动态 child 窗口的边界是：
+
+```json
+// capabilities/default.json
+{
+  "identifier": "default",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-start-dragging",
+    "dialog:default"
+  ]
+}
+```
+
+```json
+// capabilities/children.json
+{
+  "identifier": "children",
+  "windows": ["child-*"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging"
+  ]
+}
+```
+
+`capabilities/` 下的 JSON 会自动加载，无需在 Rust 再注册。新增动态窗口时必须同时检查真实 label、通配符是否被运行时接受、事件权限是否足够，以及 Rust command 是否仍做调用方授权。capability 不能替代 `child_windows.rs` 对“只能关闭自身/只能向 blank child 发消息”的业务检查。
+
+不要把主窗口的 `dialog:default`、未来的 fs 或 opener 权限复制给 child，除非 child 真的需要。
+
+---
+
 capabilities 按窗口 label 生效。新增窗口时：
 
 ```json
 // capabilities/default.json —— 主窗口保持完整权限
-{ "identifier": "default", "windows": ["main"], "permissions": ["core:default", "opener:default", "fs:default"] }
+{ "identifier": "default", "windows": ["main"], "permissions": ["core:default", "fs:default"] }
 ```
 
 ```json
@@ -246,10 +299,11 @@ window.set_size(tauri::LogicalSize::new(1024.0, 768.0))?;
 
 ## 8. 与其他层的协调
 
-- 插件注册的 Rust 侧写法见 `.claude/skills/tauri2-rust-backend/SKILL.md` 第 7 节。
-- `devUrl` 与 Vite 端口的双向约定见 `.claude/skills/tauri2-frontend/SKILL.md` 第 4 节。
-- 权限被拒的错误只在前端 devtools 可见，排查方法见 `.claude/skills/tauri2-ipc/SKILL.md` 第 7 节。
-- `bundle` 相关字段与打包产物见 `.claude/skills/tauri2-build-release/SKILL.md`。
+- 插件注册的 Rust 侧写法见 [tauri2-rust-backend](../tauri2-rust-backend/SKILL.md) 第 7 节。
+- `devUrl` 与 Vite 端口的双向约定见 [tauri2-frontend](../tauri2-frontend/SKILL.md) 第 4 节。
+- child window、tray、dialog 和窗口控制的实际组合见 [tauri2-desktop-integration](../tauri2-desktop-integration/SKILL.md)。
+- 权限被拒的错误只在前端 devtools 可见，排查方法见 [tauri2-ipc](../tauri2-ipc/SKILL.md) 第 7 节。
+- `bundle` 相关字段与打包产物见 [tauri2-build-release](../tauri2-build-release/SKILL.md)。
 
 ## 官方 references
 

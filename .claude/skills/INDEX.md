@@ -1,34 +1,48 @@
 # tauri2-template Skills 索引
 
-本项目附带的开发技能库，按**组件**拆分为 5 个 SKILL，覆盖 Rust 后端、前端、IPC、配置权限、构建发布。
+本项目附带的开发技能库按**基础 Tauri 组件**与**Foundation Desktop 领域能力**拆分。调用方式：在对话中直接使用 `/<skill-name>`，或由 AI 根据任务自动匹配加载。
 
-调用方式：在对话中直接使用 `/<skill-name>`，或由 AI 根据任务自动匹配加载。
+## 基础 Tauri skill
 
 | Skill | 触发场景 | 主要内容 |
 |-------|---------|---------|
-| [tauri2-rust-backend](./tauri2-rust-backend/SKILL.md) | 写 Rust 侧逻辑、加 command、管理状态、注册插件、拆分模块 | `lib.rs`/`main.rs` 分工、command 定义与注册、async command、`State` 共享状态、错误类型、模块拆分 |
-| [tauri2-frontend](./tauri2-frontend/SKILL.md) | 改 UI、写 TS 逻辑、调整 Vite、接入前端框架 | Vanilla TS 无框架模式、DOM 绑定、strict 模式陷阱、Vite 端口约定、接入 React/Vue 的正确步骤 |
-| [tauri2-ipc](./tauri2-ipc/SKILL.md) | 前后端通信、invoke 调用、事件收发、参数与错误传递 | `invoke` 与 `#[tauri::command]` 对应关系、camelCase↔snake_case、返回值类型化、`Result` 错误、event emit/listen |
-| [tauri2-config-permissions](./tauri2-config-permissions/SKILL.md) | 改窗口配置、加插件、配权限、改 identifier、配 CSP | `tauri.conf.json` 字段、capabilities ACL 模型、加插件三步、CSP 与 `withGlobalTauri` 安全考量 |
-| [tauri2-build-release](./tauri2-build-release/SKILL.md) | 构建、打包、优化体积、排查工具链与网络问题 | dev/build 命令、release profile、bundle 目标、Windows 工具链要求、镜像加速、本项目已踩过的坑 |
+| [tauri2-rust-backend](./tauri2-rust-backend/SKILL.md) | 写 Rust command、State、Builder、模块或后台 worker | `lib.rs`/`main.rs` 分工、commands/models/state/events、错误、async、锁和线程所有权 |
+| [tauri2-frontend](./tauri2-frontend/SKILL.md) | 改 Vanilla TS、Vite、strict 或静态资源 | Vite 端口、strict 陷阱、DOM 基础规则、typed facade 入口 |
+| [tauri2-ipc](./tauri2-ipc/SKILL.md) | 前后端 command、event、类型或错误契约 | `invokeCommand`、camelCase↔snake_case、serde 返回值、event 命名和 unlisten |
+| [tauri2-config-permissions](./tauri2-config-permissions/SKILL.md) | 改窗口配置、CSP、capability、插件权限或 identifier | `tauri.conf.json`、主/子窗口 ACL、dialog/window 权限、CSP 与 global API |
+| [tauri2-build-release](./tauri2-build-release/SKILL.md) | 构建、打包、工具链、跨平台或原生 smoke test | dev/build 链路、Windows 工具链、release profile、打包和验证边界 |
+
+## Foundation Desktop 领域 skill
+
+| Skill | 触发场景 | 主要内容 |
+|-------|---------|---------|
+| [tauri2-vanilla-app-architecture](./tauri2-vanilla-app-architecture/SKILL.md) | 新增页面、Shell、Router、Store、service、主题、i18n 或页面生命周期 | AppShell、key-based Router、keepAlive、mount/cleanup、异步竞态、theme/i18n、runtime fallback |
+| [tauri2-desktop-integration](./tauri2-desktop-integration/SKILL.md) | 子窗口、托盘、原生 dialog、自绘标题栏、窗口控制或跨窗口消息 | child window 生命周期、消息授权、tray action、dialog facade、window capability |
+| [tauri2-storage-sqlite](./tauri2-storage-sqlite/SKILL.md) | SQLite schema、迁移、设置、偏好、数据库路径切换、统计、清理或回滚 | WAL、integrity check、schema v2、snapshot/rollback、overwrite 确认、阻塞 I/O |
+| [tauri2-subprocess-lifecycle](./tauri2-subprocess-lifecycle/SKILL.md) | 白名单外部命令、stdout/stderr、停止取消、进程组或退出清理 | 参数/CWD 校验、bounded reader、事件顺序、优雅停止、强杀/reap、JoinHandle |
+| [tauri2-rust-utils](./tauri2-rust-utils/SKILL.md) | AES-GCM、限长文件、原子替换、HTTP 重试/取消、JSONL 日志或轮转 | cryptox/filex/httpx/logx 的真实限制、错误脱敏、内部工具边界 |
+
+领域 skill 不重复完整的基础 IPC、ACL、Vite 或构建教程；需要跨层时通过上表中的关联 skill 协作。X-Pro DataGrid/chart 是演示页面，不单独建立 skill。
 
 ## 组件与 SKILL 对应表
 
 | 项目路径 | 归属 SKILL |
 |---------|-----------|
-| `src-tauri/src/lib.rs`、`src-tauri/src/main.rs` | tauri2-rust-backend |
-| `src-tauri/Cargo.toml`（依赖与 profile） | tauri2-rust-backend / tauri2-build-release |
-| `src-tauri/build.rs` | tauri2-build-release |
-| `index.html`、`src/main.ts`、`src/styles.css` | tauri2-frontend |
-| `vite.config.ts`、`tsconfig.json`、`package.json` | tauri2-frontend |
-| 跨 `src/main.ts` ↔ `src-tauri/src/lib.rs` 的调用链 | tauri2-ipc |
-| `src-tauri/tauri.conf.json` | tauri2-config-permissions |
-| `src-tauri/capabilities/*.json`、`src-tauri/gen/schemas/` | tauri2-config-permissions |
-| `src-tauri/icons/`、构建产物与安装包 | tauri2-build-release |
+| `src-tauri/src/lib.rs`、`src-tauri/src/main.rs`、`src-tauri/src/commands/`、`src-tauri/src/models/` | tauri2-rust-backend / tauri2-ipc |
+| `src-tauri/src/state.rs`、`src-tauri/src/events.rs` | tauri2-rust-backend / tauri2-ipc |
+| `src-tauri/src/storage/`、`src-tauri/src/commands/storage.rs`、`src-tauri/src/commands/settings.rs` | tauri2-storage-sqlite |
+| `src-tauri/src/subprocess.rs`、`src-tauri/src/process_group.rs`、`src-tauri/src/commands/subprocess.rs` | tauri2-subprocess-lifecycle |
+| `src-tauri/src/child_windows.rs`、`src-tauri/src/tray.rs`、`src-tauri/src/commands/windows.rs` | tauri2-desktop-integration |
+| `src-tauri/src/utils/` | tauri2-rust-utils |
+| `src-tauri/tauri.conf.json`、`src-tauri/capabilities/*.json` | tauri2-config-permissions / tauri2-desktop-integration |
+| `index.html`、`src/main.ts`、`src/styles.css`、`src/api/`、`src/contracts/` | tauri2-frontend / tauri2-ipc / tauri2-vanilla-app-architecture |
+| `src/components/`、`src/router/`、`src/store/`、`src/theme/`、`src/i18n/`、`src/pages/`、`src/services/` | tauri2-vanilla-app-architecture |
+| `package.json`、`vite.config.ts`、`tsconfig.json` | tauri2-frontend / tauri2-build-release |
+| `Cargo.toml`、`Cargo.lock`、构建产物与安装包 | tauri2-rust-backend / tauri2-build-release |
 
 ## 内容来源
 
-每个 SKILL 的入口说明基于**本仓库的真实代码与实测结果**撰写；对应的官方 Tauri v2 原文已同步到各自的 `references/` 目录。共复制 29 份原始 `.md/.mdx` 文件，重复文件按组件独立保存，方便每个 skill 单独查阅。
+基础 Tauri skill 的入口说明基于本仓库真实代码与实测结果；对应官方 Tauri v2 原文保留在各自 `references/` 目录。新增领域 skill 的 `references/INDEX.md` 只登记本仓库实现和关联基础 skill，不重复复制官方文档。
 
 官方文档同步基准：
 
@@ -38,7 +52,7 @@
 - 同步日期：2026-09-30
 - 上游仓库许可证：MIT
 
-各组件 references 索引：
+基础组件 references 索引：
 
 - [Rust 后端 references](./tauri2-rust-backend/references/INDEX.md)
 - [前端 references](./tauri2-frontend/references/INDEX.md)
@@ -46,26 +60,18 @@
 - [配置与权限 references](./tauri2-config-permissions/references/INDEX.md)
 - [构建与发布 references](./tauri2-build-release/references/INDEX.md)
 
-需要访问在线官方文档时的入口：
+领域实现 references：
 
-- 官方文档：https://tauri.app/
-- command 与 IPC：https://tauri.app/develop/calling-rust/
-- 权限模型：https://tauri.app/security/capabilities/
-- 配置参考：https://schema.tauri.app/config/2
-
-每个 SKILL 目录结构：
-
-```
-tauri2-<name>/
-├── SKILL.md          # 触发条件 + 铁律 + 本项目真实代码示例 + 反例
-└── references/
-    ├── INDEX.md      # 上游来源、commit、许可与文件映射
-    └── ...           # Tauri 官方 .md/.mdx 原文
-```
+- [Vanilla 应用架构 references](./tauri2-vanilla-app-architecture/references/INDEX.md)
+- [桌面集成 references](./tauri2-desktop-integration/references/INDEX.md)
+- [SQLite 存储 references](./tauri2-storage-sqlite/references/INDEX.md)
+- [子进程生命周期 references](./tauri2-subprocess-lifecycle/references/INDEX.md)
+- [Rust 工具层 references](./tauri2-rust-utils/references/INDEX.md)
 
 ## 版本基准
 
-- Tauri 2.12.0 / tauri-build 2.7.0 / tauri-plugin-opener 2.7.0（均为最新稳定版）
+- Tauri 2.12.0 / tauri-build 2.7.0 / tauri-plugin-opener 2.7.0
 - Rust 1.98.1（stable-x86_64-pc-windows-msvc）
 - TypeScript 7.0.2 / Vite 8.3.1 / @tauri-apps/api 2.12.0
-- 基准日期：2026-09-30
+- Foundation Desktop 迁移基准：2026-10-01
+- 基础文档同步基准：2026-09-30

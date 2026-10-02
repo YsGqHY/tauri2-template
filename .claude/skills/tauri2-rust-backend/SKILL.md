@@ -5,7 +5,7 @@ description: tauri2-template 的 Rust 后端开发指南。说明 lib.rs 与 mai
 
 # Rust 后端（src-tauri）
 
-本项目 Rust 侧刻意保持极简：[src-tauri/src/lib.rs](../../../src-tauri/src/lib.rs) 承载全部业务与 Builder 装配，[src-tauri/src/main.rs](../../../src-tauri/src/main.rs) 只做入口。
+本项目 Rust 侧采用按领域拆分的模块化结构：[src-tauri/src/lib.rs](../../../src-tauri/src/lib.rs) 只负责 Builder/setup、State、插件、command 注册和退出清理；业务逻辑位于 `commands/`、`storage/`、`subprocess.rs` 与 `utils/` 等模块；[src-tauri/src/main.rs](../../../src-tauri/src/main.rs) 仍只做入口调用。
 
 ---
 
@@ -13,14 +13,25 @@ description: tauri2-template 的 Rust 后端开发指南。说明 lib.rs 与 mai
 
 ```
 src-tauri/
-├── Cargo.toml          # 依赖 + [lib] 名 + release profile
-├── build.rs            # tauri_build::build()，勿改
+├── Cargo.toml             # 依赖 + [lib] 名 + release profile
+├── build.rs               # tauri_build::build()，勿改
+├── capabilities/          # 主窗口与 child-* 窗口 ACL
 └── src/
-    ├── lib.rs          # ← 业务代码写这里：command 定义 + Builder 装配
-    └── main.rs         # ← 只允许一行 run() 调用，不放业务代码
+    ├── lib.rs             # Builder、setup、State、command 注册、Exit 清理
+    ├── main.rs            # 仅调用 lib::run()
+    ├── commands/          # 薄 command facade，做窗口/参数/错误边界
+    ├── models/            # serde 输入、输出和 event payload
+    ├── state.rs            # AppState、锁、取消信号、worker registry
+    ├── events.rs           # Tauri event 名称与 payload 发射
+    ├── storage/            # SQLite schema、迁移、设置和路径回滚
+    ├── subprocess.rs       # 白名单子进程、reader、停止和历史
+    ├── process_group.rs    # Unix 进程组与 Windows JobObject/fallback
+    ├── child_windows.rs    # 动态子窗口与跨窗口消息
+    ├── tray.rs             # 系统托盘菜单与 action event
+    └── utils/              # cryptox/filex/httpx/logx 内部工具
 ```
 
-**为什么分成两个文件**：移动端（iOS/Android）不走 `main` 入口，而是由系统调用 `#[cfg_attr(mobile, tauri::mobile_entry_point)]` 标注的 `run()`。业务写在 `lib.rs` 才能同时支持桌面与移动端。
+**为什么分成 lib 与 main**：移动端不走 `main` 入口，而是由系统调用带 `mobile_entry_point` 的 `run()`。领域模块留在 `lib.rs` 所在 crate，才能保持桌面与移动入口一致；`main.rs` 不得追加业务代码。
 
 `main.rs` 当前内容（不要追加业务代码）：
 
@@ -165,6 +176,18 @@ async fn fetch_data(url: String) -> Result<String, String> {
 
 Tauri 已通过依赖树引入 tokio；若要直接用 tokio API，在 `Cargo.toml` 显式加 `tokio` 依赖，不要依赖传递依赖。
 
+### 5.1 阻塞工作、线程所有权与取消
+
+- async command 不直接调用 `std::fs`、`std::thread::sleep`、`reqwest::blocking`、长时间同步 SQLite 或其他可能长时间阻塞的 API。有限阻塞任务用 `tauri::async_runtime::spawn_blocking`；短小且有界的逻辑可用同步 command；长生命周期循环、子进程 pipe 读取/监视用专用 `std::thread`，并保存和回收 `JoinHandle`。
+- Rayon 只用于经测量确认的 CPU 密集、可分块工作；它不替代 I/O worker，也不是 Go `GOMAXPROCS` 的机械对应。本项目当前没有 Rayon 依赖。
+- Rust 线程不会像 Go `context.Context` 一样自动继承取消。显式传递 `CancellationToken` / 原子停止标志，并定义资源清理、超时和退出协议；不可丢弃 join handle 后假设任务已停止。
+- **锁不得跨 `.await`**：在 await 前克隆/取出所需数据并释放 `std::sync` guard。只有确实需要跨 await 的短临界区才考虑 async mutex；不得在持锁时做文件、网络、子进程或数据库 I/O。
+- 停止/退出必须有界：先协作取消，经过明确宽限期后强制终止，再在 deadline 内 join；外部子进程还需终止整个进程组/树。不可让应用退出无期限等待 worker。
+
+本项目当前子进程实现由 reader 线程加独占 `Child` 的 worker 管理，使用 `AtomicBool` 停止标志；输出快照每流最多 256 行，单行最多 1 MiB，超限追加截断标记，历史最多 64 项。[subprocess.rs](../../../src-tauri/src/subprocess.rs#L92-L190) worker 对子进程有 5 秒优雅期、强杀后 2 秒等待和直接 `Child::kill` 兜底；force termination 后会 reap child。reader shutdown 最多等待 2 秒，超时发出最后手段 detach warning；shutdown lifecycle gate 拒绝迟到的 subprocess 注册，`ready` event 先于 worker 发出，已完成 `JoinHandle` 会被清理。[subprocess.rs](../../../src-tauri/src/subprocess.rs#L190-L237) [process_group.rs](../../../src-tauri/src/process_group.rs#L105-L162) [process_group.rs](../../../src-tauri/src/process_group.rs#L164-L233) Windows JobObject attach 仍是 post-spawn race，失败时退化到 taskkill fallback；Unix runtime 尚未验证。[state.rs](../../../src-tauri/src/state.rs#L82-L108) Foundation 的 external context、`KillGracePeriod`、stdin、env、`CaptureOutput` 通用 API 未暴露为当前 Tauri contract，不能假定 IPC 已等价。
+
+本项目 HTTP 工具使用 `reqwest::blocking`；其 30 秒请求超时限制正在执行的 socket I/O，`CancellationToken` 只在请求前和 retry backoff 切片之间检查，不能立即中断已开始的阻塞请求。[httpx.rs](../../../src-tauri/src/utils/httpx.rs#L261-L300) 从 async command 使用时须放入 `spawn_blocking` 或专用 worker，并向调用方说明最坏取消延迟。
+
 ---
 
 ## 6. 共享状态（State）
@@ -221,39 +244,43 @@ tauri::Builder::default()
 
 ## 8. 业务变大后拆分模块
 
-`lib.rs` 超过 200 行就该拆。推荐按领域分文件：
+业务变大后按领域拆分，不要继续堆进 `lib.rs`。当前项目的分层是：
 
 ```
 src/
-├── lib.rs              # 只留 run() 与 generate_handler!
+├── lib.rs             # 模块声明、Builder/setup、State、注册和退出清理
 ├── main.rs
-├── commands/
-│   ├── mod.rs          # pub use 各子模块
-│   ├── config.rs       # 配置相关 command
-│   └── file.rs         # 文件相关 command
-└── services/
-    └── storage.rs      # 纯逻辑，不带 #[tauri::command]
+├── commands/          # app/settings/storage/windows/subprocess command facade
+├── models/            # serde contract
+├── storage/           # SQLite 领域逻辑与测试
+├── subprocess.rs      # 长生命周期进程 worker
+├── process_group.rs   # 平台进程树终止
+├── state.rs           # 共享状态与生命周期 gate
+├── events.rs          # event 发射 helper
+└── utils/             # 内部工具，不直接暴露 IPC
 ```
 
 ```rust
-// lib.rs
-mod commands;
-mod services;
-
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
-            commands::config::load_config,
-            commands::config::save_config,
-            commands::file::read_file,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
-}
+// lib.rs：只做装配，不把 storage/subprocess 算法写进来
+let app = tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_opener::init())
+    .setup(|app| {
+        let storage = storage::initialize(app.path().app_data_dir()?)?;
+        app.manage(AppState::new(storage));
+        tray::init(app.handle())?;
+        events::start_time_loop(app.handle())?;
+        Ok(())
+    })
+    .invoke_handler(tauri::generate_handler![
+        commands::settings::get_app_settings,
+        commands::storage::get_storage_stats,
+        commands::subprocess::run_subprocess,
+    ])
+    .build(tauri::generate_context!())?;
 ```
 
-**command 函数保持瘦**：把真实逻辑放 `services/` 里的普通函数，command 只做参数转换与错误映射。这样逻辑可以直接 `cargo test`，而 command 本身难以单测。
+**command 函数保持瘦**：只做调用方/参数边界和错误映射；真实逻辑放 `storage/`、`subprocess.rs`、`child_windows.rs` 或纯 helper 中。长生命周期 worker 必须由 `AppState` 注册和回收，不能在 command 内 spawn 后遗弃。这样纯逻辑可以直接 `cargo test`，而 command 本身只需做少量集成验证。
 
 ---
 
@@ -326,9 +353,13 @@ async fn bad() -> String {
 
 ## 11. 与其他层的协调
 
-- 新增 command 后，前端调用方式见 `.claude/skills/tauri2-ipc/SKILL.md`。
-- 用到插件能力时，权限配置见 `.claude/skills/tauri2-config-permissions/SKILL.md`。
-- `Cargo.toml` 的 `[profile.release]` 已配好体积优化（lto/strip/panic=abort），含义见 `.claude/skills/tauri2-build-release/SKILL.md`。
+- 新增 command、event、错误和 Rust/TS 类型同步见 [tauri2-ipc](../tauri2-ipc/SKILL.md)。
+- SQLite schema、路径切换和设置持久化见 [tauri2-storage-sqlite](../tauri2-storage-sqlite/SKILL.md)。
+- 子进程、取消、进程组和退出清理见 [tauri2-subprocess-lifecycle](../tauri2-subprocess-lifecycle/SKILL.md)。
+- child window、tray、dialog 和窗口 ACL 见 [tauri2-desktop-integration](../tauri2-desktop-integration/SKILL.md)。
+- cryptox/filex/httpx/logx 见 [tauri2-rust-utils](../tauri2-rust-utils/SKILL.md)。
+- 用到插件能力时，权限配置见 [tauri2-config-permissions](../tauri2-config-permissions/SKILL.md)。
+- `Cargo.toml` 的 `[profile.release]` 已配好体积优化（lto/strip/panic=abort），含义见 [tauri2-build-release](../tauri2-build-release/SKILL.md)。
 - `panic = "abort"` 意味着 release 下 panic 不会 unwind，**不能**用 `catch_unwind` 兜错。依赖该行为前先改 profile。
 
 ## 官方 references

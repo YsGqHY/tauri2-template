@@ -118,6 +118,27 @@ pnpm tauri icon path/to/icon.png     # 建议源图 1024x1024 带透明通道
 
 Linux 构建额外需要系统库（webkit2gtk 等）；macOS 需 Xcode 命令行工具与签名证书。这也是 [src-tauri/Cargo.lock](../../../src-tauri/Cargo.lock) 里存在 GTK/Linux 相关 crate 的原因 —— 它们在 Windows 上不参与编译，只是出现在依赖图里。
 
+### 并发变更的验证边界
+
+`cargo test`、`cargo check --all-targets` 和 `cargo build` 验证的是**当前主机目标与工具链**；`--all-targets` 不是 Windows/Linux/macOS 矩阵，也不能替代原生平台构建。涉及子进程、信号、进程组、文件原子替换或退出清理时，各目标平台分别运行测试/构建并做真实进程树 smoke test。不要将一个平台的 `cargo test` 或 `cargo check` 记成所有平台通过。
+
+并发停止测试应断言有明确上限：取消传播、优雅停止宽限期、超时强杀、force termination 后 child reap、stdout/stderr reader 收尾及应用退出 join 均需可观察地完成。当前 worker 对子进程有优雅停止与强杀等待 deadline；reader shutdown 最多等待 2 秒，超时必须留下最后手段 detach warning；shutdown lifecycle gate 拒绝迟到 subprocess 注册，`ready` event 先于 worker，完成的 `JoinHandle` 会被清理。Windows 使用 JobObject（post-spawn attach，带 taskkill fallback），Unix 使用进程组 SIGTERM/SIGKILL；Unix runtime 仍未验证。Foundation 的 external context、`KillGracePeriod`、stdin、env、`CaptureOutput` 通用 API 未由当前 Tauri contract 暴露，跨实现测试不得假定这些能力存在。
+
+### Foundation Desktop 原生 smoke-test 清单
+
+以下能力不能只用 `pnpm build`、`cargo check` 或静态 capability 检查证明：
+
+- 无边框主窗口的拖拽、最小化、最大化切换和关闭。
+- `child-*` 动态窗口的打开、结果、closed event、点对点消息和广播。
+- tray 的 show/home/settings/quit action 与退出时 `stop_and_join`。
+- native dialog 的文件选择、覆盖确认、取消路径和错误提示。
+- SQLite 路径切换时 Windows 文件句柄、WAL/SHM 忙碌目标和失败回滚。
+- subprocess 白名单、stdout/stderr 流、ready-before-exit、优雅停止、强杀、进程树和 reader 收尾。
+
+Windows 重点验证 JobObject attach race 与 taskkill fallback；Unix 类平台重点验证 `setsid`/进程组、SIGTERM/SIGKILL 和 zombie reap。不要把单个平台的 `cargo test` 结果写成所有平台的行为保证。
+
+领域实现细节分别见 [tauri2-desktop-integration](../tauri2-desktop-integration/SKILL.md)、[tauri2-storage-sqlite](../tauri2-storage-sqlite/SKILL.md) 和 [tauri2-subprocess-lifecycle](../tauri2-subprocess-lifecycle/SKILL.md)。
+
 ---
 
 ## 7. 本项目已踩过的坑（勿重复排查）
