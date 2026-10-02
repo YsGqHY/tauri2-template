@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "children",
+  "description": "Core event and window access for dynamically created child windows",
+  "windows": ["child-*"],
+  "permissions": ["core:event:default", "core:window:allow-close", "core:window:allow-start-dragging"]
+}
