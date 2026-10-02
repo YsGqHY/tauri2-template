@@ -41,3 +41,5 @@ Desktop.ini
 
 # NarraFork workspace metadata
 .narrafork/
+/docs
+/artifacts

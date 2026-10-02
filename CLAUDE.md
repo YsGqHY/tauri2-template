@@ -137,6 +137,22 @@ v2 用 capabilities ACL 取代了 v1 的 allowlist。[src-tauri/capabilities/def
 - **withGlobalTauri 为 true**：`window.__TAURI__` 可用。它扩大了前端攻击面，若不需要全局注入建议关掉，改用 ESM import。
 - **依赖镜像**：cargo 走清华 TUNA 镜像（配置在用户级 `~/.cargo/config.toml`，不在仓库内）。换机器需自行配置，否则首次构建可能极慢。
 
+## Go 并发迁移与 Rust 实践
+
+Foundation 的并发语义可以借鉴，但不要把 Go runtime/API 机械翻译成 Rust：
+
+| Foundation（Go）事实 | 当前 Rust 实现 / 差异 |
+|---|---|
+| `procx` 用 goroutine 读 stdout/stderr，`sync.WaitGroup` 收尾；`context.Context`/`Done()` 触发停止；process `doneCh` 通知完成。Wails subprocess service 调用 `StartCtx(context.Background(), ...)`，所以 IPC 调用 context 不拥有进程生命周期，用户须显式 Stop。 | 子进程由 `std::thread::spawn` reader 与独占 `Child` 的 worker 管理，`JoinHandle` 放入 `background_tasks`；`AtomicBool` 是协作停止标志，不会自动取消线程。生命周期 gate 在 shutdown 后拒绝迟到的 subprocess 注册；`ready` event 先于 worker 启动发出；完成的 `JoinHandle` 会被清理。前端流通过 Tauri events，不是 Go channel 的直接移植。[src-tauri/src/subprocess.rs](src-tauri/src/subprocess.rs#L92-L187) [src-tauri/src/state.rs](src-tauri/src/state.rs#L82-L108) [src-tauri/src/events.rs](src-tauri/src/events.rs#L16-L34) |
+| 状态用 `Mutex` / `RWMutex` / atomic；服务以锁保护进程 map 和递增 ID。 | 使用 `Mutex`、`RwLock`、`AtomicBool`、`AtomicU64`；rusqlite `Connection` 由 `Arc<Mutex<Connection>>` 串行访问。子进程每个输出流的快照最多 256 行；单行最多 1 MiB，超限追加截断标记；退出历史最多 64 项。[src-tauri/src/state.rs](src-tauri/src/state.rs#L13-L20) [src-tauri/src/state.rs](src-tauri/src/state.rs#L27-L57) [src-tauri/src/subprocess.rs](src-tauri/src/subprocess.rs#L145-L166) |
+| Go Windows 用 JobObject + `KILL_ON_JOB_CLOSE`，Unix 用独立 pgid，取消时先优雅停、宽限后强杀。 | Rust Unix 用 `setsid`/进程组，先 SIGTERM 后 SIGKILL；Windows 也绑定 JobObject + `KILL_ON_JOB_CLOSE`，但在 spawn 后绑定，存在竞态，失败时退化到 taskkill。worker 有 5 秒优雅期和 2 秒强杀等待上限；强杀后会 reap child；reader shutdown 最多等待 2 秒，超时发出最后手段 detach warning。应用退出会拒绝迟到注册并清理已完成 `JoinHandle`，但 Unix runtime 尚未验证。[src-tauri/src/subprocess.rs](src-tauri/src/subprocess.rs#L190-L237) [src-tauri/src/process_group.rs](src-tauri/src/process_group.rs#L105-L162) [src-tauri/src/process_group.rs](src-tauri/src/process_group.rs#L164-L233) [src-tauri/src/state.rs](src-tauri/src/state.rs#L82-L108) |
+| `httpx` 是共享 `net/http` client，30 秒 context deadline；默认不重试，显式 `Retry` 才启用。`MaxAttempts` 含首次请求（<=0 规范化为 1）；默认 base delay 200ms、上限 5s，指数退避 ±25% 抖动；取消/超时不重试，HTTP 408/429/5xx 与其他网络错误可重试。 | `reqwest::blocking` 共享 client，默认 30 秒超时、8 MiB 响应上限；`max_retries` 是初次请求后的重试次数（默认 0），base delay 200ms/上限 5s；只重试幂等方法，状态规则含 408/425/429/5xx 与 transport 错误。`CancellationToken` 在请求前、退避期间检查；运行中的阻塞请求不被 token 立即打断，只受请求超时限制；当前实际退避传入固定 jitter 样本 1.0，并非随机抖动。[src-tauri/src/utils/httpx.rs](src-tauri/src/utils/httpx.rs#L45-L60) [src-tauri/src/utils/httpx.rs](src-tauri/src/utils/httpx.rs#L261-L300) |
+| `logx` 用 `slog` 和互斥轮转 writer，默认 8 MiB、3 个备份；`filex.WriteAtomic` 同目录临时文件、fsync、rename。 | `RotatingFileSink` 以 `Mutex` 串行写 JSONL，默认 8 MiB/3 份并对常见凭据标签脱敏；`filex::write_atomic` 用唯一同目录临时文件、sync、原子替换，目录 sync 尽力而为。[src-tauri/src/utils/logx.rs](src-tauri/src/utils/logx.rs#L101-L190) [src-tauri/src/utils/filex.rs](src-tauri/src/utils/filex.rs#L47-L82) |
+
+**迁移取舍：**直接复用“所有权清晰、显式取消、有限超时、有限缓冲、幂等重试、配置原子替换、日志轮转”的设计意图；用 Rust 原语和 Tauri event 契约适配 Go goroutine/context/WaitGroup/channel。Foundation 的 AES-GCM 安全目标在 Rust `cryptox` 以 AES-256-GCM + 用户数据目录主密钥实现，不是并发 API 的移植。[src-tauri/src/utils/cryptox.rs](src-tauri/src/utils/cryptox.rs#L1-L25) 当前不迁移 `GOMAXPROCS`、`runtime.LockOSThread` 或 server 专用 build tags：Foundation 源码未使用前两者，也没有 server 构建分支；已有 `//go:build` 是 Windows/Unix 与窗口/托盘等平台分支，Rust 仅在需要处用 `cfg(target_os)`。本项目没有 Rayon；不要为复刻 Go 调度器预设线程数，只有 CPU 密集任务经测量确认后才考虑 Rayon。
+
+**实施规则：**async command 不直接执行 `std::fs`、`std::thread::sleep`、`reqwest::blocking`、长时间 SQLite/其他阻塞 I/O；选择 `tauri::async_runtime::spawn_blocking` 做有限阻塞工作、专用且受管理的线程做长生命周期读写/进程监视、Rayon 做可分块 CPU 密集工作、受白名单约束的子进程做外部工具。同步 command 只用于有界且短小的工作。不得持有 `std::sync::{MutexGuard, RwLockReadGuard, RwLockWriteGuard}` 跨 `.await`；先克隆所需数据并释放 guard。停止和应用退出必须有取消信号、明确宽限期/强制终止策略及有界等待；reader shutdown 的 2 秒上限、最后手段 detach warning、late-registration gate、ready-before-worker 顺序、force termination reap 和 completed `JoinHandle` pruning 都属于可观察契约。当前剩余平台风险是 Windows JobObject attach 的 post-spawn race/taskkill fallback，以及 Unix runtime 尚未验证。Foundation 的通用 `context`、`KillGracePeriod`、stdin、env、`CaptureOutput` 能力未作为当前 Tauri contract 暴露；需要时应设计显式 typed contract，不要假定 IPC 已等价。
+
 ## 已验证事实（勿凭猜测推翻）
 
 - Tauri 2.12.0 / tauri-build 2.7.0 / tauri-plugin-opener 2.7.0 均为当前最新稳定版。
@@ -151,3 +167,4 @@ v2 用 capabilities ACL 取代了 v1 的 allowlist。[src-tauri/capabilities/def
 - 2026-09-30（依赖更新）：TypeScript 6.0.3 → 7.0.2（跨大版本，经隔离实测通过）；`@tauri-apps/plugin-opener` 2.6.0 → 2.7.0，与 Rust 侧版本对齐。Tauri 核心确认已是最新稳定版，未升级至 3.0.0-alpha 预发布版。
 - 2026-09-30（文档）：初始化 CLAUDE.md 与 `.claude/skills/` 开发技能库。
 - 2026-09-30（官方 references）：从 `tauri-apps/tauri-docs` 的 `v2` 分支（commit `fb135dc6f6894c62ba41a04128e9cb05564a9b7a`）同步 29 份 Tauri 官方 `.md/.mdx` 原文到五个 skill 的 `references/` 目录，并保留 MIT 来源说明。
+- 2026-10-01（foundation 迁移）：完成 Rust-first Foundation Desktop 工作台迁移：Vanilla TS 壳、主题/i18n、Home/Settings/X-Pro/Subprocess 页面、rusqlite 新 schema、typed IPC、dialog/tray/child windows、受限 subprocess、AES-GCM/http/log/file 工具层；通过 `pnpm build`、30 项 Rust 测试、`cargo check/build` 和 MSI/NSIS 打包。详见 `docs/explore-develop/2026-10-01-2128-foundation-migration.md`。
