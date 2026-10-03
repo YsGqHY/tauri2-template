@@ -100,7 +100,7 @@ strip = true         # 剥离符号表
 "targets": ["nsis"]
 ```
 
-产物位置：`src-tauri/target/release/bundle/<格式>/`。
+本项目的 Cargo 输出目录统一配置为仓库根部的 `target/`（见 [项目级 Cargo 配置](../../../.cargo/config.toml)），打包产物位置：`target/release/bundle/<格式>/`。
 
 图标必须齐全，缺失会导致打包失败。换图标不要手工逐个替换，用 CLI 从一张源图生成全套：
 
