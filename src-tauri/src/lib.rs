@@ -42,6 +42,7 @@ pub fn run() {
             commands::settings::reset_preferences,
             commands::storage::get_storage_stats,
             commands::storage::get_table_stats,
+            commands::storage::get_storage_snapshot,
             commands::storage::set_custom_storage_path,
             commands::storage::reset_storage_path,
             commands::storage::clear_table,

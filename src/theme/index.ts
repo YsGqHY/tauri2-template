@@ -1,4 +1,4 @@
-import type { CustomTheme, ThemeChoice, ThemeMode, ThemeToken } from "../contracts/types";
+import type { CustomTheme, CustomThemeSnapshot, ThemeChoice, ThemeMode, ThemeToken } from "../contracts/types";
 
 export type ThemePalette = Record<ThemeToken, string>;
 
@@ -8,29 +8,140 @@ export const themeTokens: ThemeToken[] = [
 ];
 
 export const lightPalette: ThemePalette = {
-  bg: "#f5f7fb", surface: "#ffffff", surfaceRaised: "#ffffff", surfaceMuted: "#eef2f8", text: "#172033", textMuted: "#5d6a7d", textSubtle: "#8490a3", border: "#dbe2ec", accent: "#2f6fed", accentStrong: "#1d4ed8", accentSoft: "#e5edff", success: "#1e9b6b", warning: "#c78318", danger: "#d64a58", info: "#3d83c6", focus: "#83a9ff", sidebar: "#ffffff",
+  bg: "#ffffff",
+  surface: "#ffffff",
+  surfaceRaised: "#eef1f6",
+  surfaceMuted: "rgba(15, 23, 42, 0.08)",
+  text: "#0b1220",
+  textMuted: "#3f4a5a",
+  textSubtle: "#8a93a4",
+  border: "rgba(15, 23, 42, 0.10)",
+  accent: "#2563eb",
+  accentStrong: "#1d4ed8",
+  accentSoft: "rgba(37, 99, 235, 0.14)",
+  success: "#16a34a",
+  warning: "#d97706",
+  danger: "#dc2626",
+  info: "#2563eb",
+  focus: "#1d4ed8",
+  sidebar: "#f6f7fa",
 };
 
 export const darkPalette: ThemePalette = {
-  bg: "#141822", surface: "#1d2330", surfaceRaised: "#252d3c", surfaceMuted: "#242b38", text: "#eff4ff", textMuted: "#a5b0c3", textSubtle: "#738097", border: "#374156", accent: "#77a5ff", accentStrong: "#9bbaff", accentSoft: "#253b69", success: "#5bd5a2", warning: "#f1be62", danger: "#ff7b87", info: "#75b8ef", focus: "#9bbaff", sidebar: "#1a202c",
+  bg: "#0b0d10",
+  surface: "#22262d",
+  surfaceRaised: "#2a2f37",
+  surfaceMuted: "rgba(255, 255, 255, 0.06)",
+  text: "#f8fafc",
+  textMuted: "#cbd5e1",
+  textSubtle: "#64748b",
+  border: "rgba(255, 255, 255, 0.08)",
+  accent: "#60a5fa",
+  accentStrong: "#93c5fd",
+  accentSoft: "rgba(96, 165, 250, 0.16)",
+  success: "#4ade80",
+  warning: "#fbbf24",
+  danger: "#f87171",
+  info: "#60a5fa",
+  focus: "#93c5fd",
+  sidebar: "#15181d",
 };
 
 export const obsidianPalette: ThemePalette = {
-  bg: "#0a0a10", surface: "#11111b", surfaceRaised: "#191925", surfaceMuted: "#1b1b2a", text: "#f4f3ff", textMuted: "#b4b0ca", textSubtle: "#7d789a", border: "#302c4a", accent: "#9b8cff", accentStrong: "#b7adff", accentSoft: "#292445", success: "#68d5ac", warning: "#efbc67", danger: "#ff7e93", info: "#80bfff", focus: "#b7adff", sidebar: "#0f0f18",
+  bg: "#000000",
+  surface: "#16161b",
+  surfaceRaised: "#1c1c22",
+  surfaceMuted: "rgba(167, 139, 250, 0.08)",
+  text: "#f5f5f7",
+  textMuted: "#c4c4cc",
+  textSubtle: "#6b6b78",
+  border: "rgba(255, 255, 255, 0.06)",
+  accent: "#a78bfa",
+  accentStrong: "#c4b5fd",
+  accentSoft: "rgba(167, 139, 250, 0.18)",
+  success: "#4ade80",
+  warning: "#fbbf24",
+  danger: "#f87171",
+  info: "#a78bfa",
+  focus: "#c4b5fd",
+  sidebar: "#0a0a0c",
 };
 
 let mediaCleanup: (() => void) | null = null;
 
-export const isValidHexColor = (value: string): boolean => /^#(?:[\da-f]{3}|[\da-f]{6}|[\da-f]{8})$/i.test(value.trim());
+const themeChoiceAliases: Record<string, ThemeChoice> = {
+  system: "system",
+  light: "light",
+  dark: "dark",
+  obsidian: "obsidian",
+  custom: "custom",
+  "foundation-light": "light",
+  "foundation-dark": "dark",
+  "foundation-obsidian": "obsidian",
+  "foundation-custom": "custom",
+};
 
-export const validateCustomTheme = (theme: CustomTheme | null | undefined): theme is CustomTheme => {
+const cssColorFunctionNames = ["rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color"];
+
+export const isValidHexColor = (value: string): boolean => /^(#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8}))$/i.test(value.trim());
+
+export const isValidCssColor = (value: string): boolean => {
+  const normalized = value.trim();
+  if (isValidHexColor(normalized) || normalized.toLowerCase() === "transparent") {
+    return true;
+  }
+  const match = normalized.match(/^([a-z]+)\((.*)\)$/i);
+  if (!match || !cssColorFunctionNames.includes(match[1].toLowerCase())) {
+    return false;
+  }
+  return match[2].length > 0 && !/[;{}<>"'`]/.test(match[2]) && /^[\w\s.,%+\-\/()]+$/.test(match[2]);
+};
+
+export const normalizeThemeChoice = (choice: string): ThemeChoice | null => themeChoiceAliases[choice.trim()] ?? null;
+
+export const validateCustomTheme = (theme: CustomTheme | null | undefined): theme is CustomThemeSnapshot => {
   if (!theme || typeof theme !== "object" || typeof theme.palette !== "object" || theme.palette === null) {
     return false;
   }
-  return Object.values(theme.palette).every((value) => typeof value === "string" && isValidHexColor(value));
+  const mode = theme.mode ?? "light";
+  const name = theme.name?.trim() || "Foundation Custom";
+  const palette = mergePalette(mode, theme.palette);
+  return name.length <= 64 && Object.keys(theme.palette).every((key) => themeTokens.includes(key as ThemeToken)) && themeTokens.every((key) => isValidCssColor(palette[key]));
+};
+
+export const normalizeCustomTheme = (theme: CustomTheme | null | undefined): CustomThemeSnapshot | null => {
+  if (!validateCustomTheme(theme)) {
+    return null;
+  }
+  return {
+    name: theme.name?.trim() || "Foundation Custom",
+    mode: theme.mode ?? "light",
+    palette: mergePalette(theme.mode ?? "light", theme.palette),
+  };
 };
 
 const paletteForMode = (mode: ThemeMode): ThemePalette => mode === "dark" ? darkPalette : lightPalette;
+
+export const mergePalette = (mode: ThemeMode, palette: Partial<Record<ThemeToken, string>> | undefined): ThemePalette => ({
+  ...paletteForMode(mode),
+  ...(palette ?? {}),
+});
+
+export const seedCustomTheme = (choice: ThemeChoice, existing?: CustomTheme | null): CustomThemeSnapshot => {
+  const normalized = normalizeCustomTheme(existing);
+  if (normalized) {
+    return normalized;
+  }
+  const canonical = normalizeThemeChoice(choice) ?? "light";
+  const sourcePalette = resolvePalette(canonical, existing);
+  const mode: ThemeMode = canonical === "dark" || canonical === "obsidian" ? "dark" : sourcePalette === darkPalette ? "dark" : "light";
+  return {
+    name: "Foundation Custom",
+    mode,
+    palette: { ...sourcePalette },
+  };
+};
+
 
 export const resolvePalette = (choice: ThemeChoice, customTheme?: CustomTheme | null): ThemePalette => {
   if (choice === "dark") {

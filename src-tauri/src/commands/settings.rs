@@ -57,16 +57,14 @@ pub fn set_theme_choice(
     theme_choice: String,
 ) -> AppResult<AppSettings> {
     update_settings(&window, &state, |settings| {
-        if !matches!(
-            theme_choice.as_str(),
-            "system" | "light" | "dark" | "obsidian" | "custom"
-        ) {
+        let normalized = storage::normalize_theme_choice(&theme_choice)?;
+        if normalized == "custom" && settings.custom_theme.is_none() {
             return Err(AppError::new(
                 "THEME_INVALID",
-                "themeChoice 必须是 system、light、dark 或 custom",
+                "A custom theme has not been saved",
             ));
         }
-        settings.theme_choice = theme_choice.clone();
+        settings.theme_choice = normalized;
         Ok(())
     })
 }
@@ -78,10 +76,10 @@ pub fn set_custom_theme(
     custom_theme: Option<Value>,
 ) -> AppResult<AppSettings> {
     update_settings(&window, &state, |settings| {
-        if let Some(theme) = custom_theme.as_ref() {
-            storage::validate_custom_theme(theme)?;
-        }
-        settings.custom_theme = custom_theme.clone();
+        settings.custom_theme = custom_theme
+            .as_ref()
+            .map(storage::normalize_custom_theme)
+            .transpose()?;
         settings.theme_choice = if settings.custom_theme.is_some() {
             "custom".to_string()
         } else if settings.theme_choice == "custom" {

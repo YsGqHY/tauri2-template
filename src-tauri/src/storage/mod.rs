@@ -15,22 +15,48 @@ use rusqlite::Connection;
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, StorageState};
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TableDescriptor {
+    pub name: &'static str,
+    pub label_key: &'static str,
+    pub clearable: bool,
+}
+
+pub(crate) const TABLE_DESCRIPTORS: &[TableDescriptor] = &[
+    TableDescriptor {
+        name: "app_config",
+        label_key: "settings.table.appConfig",
+        clearable: false,
+    },
+    TableDescriptor {
+        name: "user_preferences",
+        label_key: "settings.table.userPreferences",
+        clearable: true,
+    },
+];
+
+pub(crate) fn table_descriptor(name: &str) -> Option<TableDescriptor> {
+    TABLE_DESCRIPTORS
+        .iter()
+        .copied()
+        .find(|descriptor| descriptor.name == name)
+}
+
 pub use data::{
-    clear_table, read_preferences, read_settings, reset_preferences, set_preference,
-    update_settings, validate_custom_theme,
+    clear_table, normalize_custom_theme, normalize_theme_choice, read_preferences, read_settings,
+    reset_preferences, set_preference, update_settings,
 };
 pub use paths::{reset_storage_path, set_custom_storage_path};
 pub use schema::migrate;
-pub use stats::{get_storage_stats, get_table_stats};
+pub use stats::{get_storage_snapshot, get_storage_stats, get_table_stats};
 
 const DATABASE_FILE_NAME: &str = "app.sqlite3";
 const STORAGE_FILE_NAME: &str = "storage.json";
-const CLEARABLE_TABLES: &[&str] = &["user_preferences"];
 
 pub fn initialize(default_dir: PathBuf) -> AppResult<StorageState> {
     fs::create_dir_all(&default_dir)?;
-    let default_dir = default_dir.canonicalize()?;
-    let default_path = default_dir.join(DATABASE_FILE_NAME);
+    let default_dir = paths::normalize_verbatim_path(&default_dir.canonicalize()?);
+    let default_path = paths::normalize_verbatim_path(&default_dir.join(DATABASE_FILE_NAME));
     let config_path = default_dir.join(STORAGE_FILE_NAME);
     let config = paths::read_config(&config_path)?;
     let current_path = match config.custom_path {

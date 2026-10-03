@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tauri::{State, WebviewWindow};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{StorageStats, StorageTableStats};
+use crate::models::{StorageSnapshot, StorageStats, StorageTableStats};
 use crate::state::AppState;
 use crate::storage;
 
@@ -23,6 +23,15 @@ pub fn get_table_stats(
 ) -> AppResult<StorageTableStats> {
     super::require_main(&window)?;
     storage::get_table_stats(&state)
+}
+
+#[tauri::command(async)]
+pub fn get_storage_snapshot(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> AppResult<StorageSnapshot> {
+    super::require_main(&window)?;
+    storage::get_storage_snapshot(&state)
 }
 
 #[tauri::command(async)]

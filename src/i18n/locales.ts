@@ -140,6 +140,10 @@ export const zhCN: LocaleDictionary = {
     defaultPath: "默认路径",
     size: "数据库大小",
     tableCount: "数据表数量",
+    table: {
+      appConfig: "应用配置",
+      userPreferences: "界面偏好",
+    },
     choosePath: "切换路径",
     resetPath: "恢复默认路径",
     tableStats: "表统计",
@@ -395,6 +399,10 @@ export const enUS: LocaleDictionary = {
     defaultPath: "Default path",
     size: "Database size",
     tableCount: "Table count",
+    table: {
+      appConfig: "App configuration",
+      userPreferences: "Interface preferences",
+    },
     choosePath: "Switch path",
     resetPath: "Reset path",
     tableStats: "Table statistics",

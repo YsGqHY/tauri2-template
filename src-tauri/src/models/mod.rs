@@ -66,6 +66,13 @@ pub struct StorageTableStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StorageSnapshot {
+    pub storage: StorageStats,
+    pub table_stats: StorageTableStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppInfo {
     pub name: String,
     pub version: String,

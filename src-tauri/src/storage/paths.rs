@@ -66,14 +66,27 @@ pub(crate) fn persist_config(path: &Path, config: &StorageConfig) -> AppResult<(
     Ok(())
 }
 
+pub(crate) fn normalize_verbatim_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    let normalized = if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        value.into_owned()
+    };
+    PathBuf::from(normalized)
+}
+
 pub(crate) fn absolute_database_path(path: &Path) -> AppResult<PathBuf> {
     if path.as_os_str().is_empty() {
         return Err(AppError::new("PATH_INVALID", "Empty storage path"));
     }
+    let path = normalize_verbatim_path(path);
     let path = if path.is_dir() {
         path.join(DATABASE_FILE_NAME)
     } else {
-        path.to_path_buf()
+        path
     };
     let absolute = if path.is_absolute() {
         path
@@ -81,7 +94,7 @@ pub(crate) fn absolute_database_path(path: &Path) -> AppResult<PathBuf> {
         std::env::current_dir()?.join(path)
     };
     if absolute.exists() {
-        return Ok(absolute.canonicalize()?);
+        return Ok(normalize_verbatim_path(&absolute.canonicalize()?));
     }
     let parent = absolute
         .parent()
@@ -90,7 +103,7 @@ pub(crate) fn absolute_database_path(path: &Path) -> AppResult<PathBuf> {
     let name = absolute
         .file_name()
         .ok_or_else(|| AppError::new("PATH_INVALID", "Storage path has no filename"))?;
-    Ok(parent.canonicalize()?.join(name))
+    Ok(normalize_verbatim_path(&parent.canonicalize()?.join(name)))
 }
 
 fn temporary_database(parent: &Path) -> AppResult<NamedTempFile> {
@@ -278,8 +291,12 @@ fn rollback(
     Ok(())
 }
 
+pub(crate) fn main_file_size(path: &Path) -> u64 {
+    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
 pub(crate) fn size(path: &Path) -> u64 {
-    let mut bytes = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    let mut bytes = main_file_size(path);
     for suffix in ["-wal", "-shm"] {
         bytes = bytes.saturating_add(
             fs::metadata(format!("{}{suffix}", path.display()))
@@ -292,9 +309,13 @@ pub(crate) fn size(path: &Path) -> u64 {
 
 pub(crate) fn stats(storage: &StorageState) -> StorageStats {
     StorageStats {
-        path: storage.current_path.to_string_lossy().into_owned(),
+        path: normalize_verbatim_path(&storage.current_path)
+            .to_string_lossy()
+            .into_owned(),
         is_custom: storage.is_custom,
-        default_path: storage.default_path.to_string_lossy().into_owned(),
+        default_path: normalize_verbatim_path(&storage.default_path)
+            .to_string_lossy()
+            .into_owned(),
         size_bytes: size(&storage.current_path),
     }
 }

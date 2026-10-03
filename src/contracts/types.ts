@@ -12,7 +12,7 @@ export interface AppInfo {
 
 export interface AppSettings {
   themeChoice: ThemeChoice;
-  customTheme: CustomTheme | null;
+  customTheme: CustomThemeSnapshot | null;
   localeChoice: LocaleChoice;
 }
 
@@ -25,6 +25,12 @@ export interface CustomTheme {
   name?: string;
   mode?: ThemeMode;
   palette: Partial<Record<ThemeToken, string>>;
+}
+
+export interface CustomThemeSnapshot {
+  name: string;
+  mode: ThemeMode;
+  palette: Record<ThemeToken, string>;
 }
 
 export type ThemeToken =
@@ -65,6 +71,11 @@ export interface TableStats {
 export interface StorageTableStats {
   totalBytes: number;
   tables: TableStats[];
+}
+
+export interface StorageSnapshot {
+  storage: StorageStats;
+  tableStats: StorageTableStats;
 }
 
 export type ChildWindowType = "confirm" | "message" | "blank";

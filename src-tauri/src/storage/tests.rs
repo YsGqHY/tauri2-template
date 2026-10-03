@@ -1,6 +1,7 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::Value;
 
 use super::data::write_settings;
@@ -161,4 +162,56 @@ fn config_failure_restores_existing_target_bytes() {
     assert!(!state.storage.read().expect("storage lock").is_custom);
     drop(state);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_theme_choice_and_partial_palette_are_normalized() {
+    let root = fixture_root("theme-compat");
+    let storage = initialize(root.clone()).expect("initialize");
+    let connection = storage.db.lock().expect("db lock");
+    connection
+        .execute(
+            "UPDATE app_config SET theme_choice=?1, custom_theme_json=?2, locale_choice=?3 WHERE id=1",
+            params![
+                "foundation-dark",
+                serde_json::to_string(&serde_json::json!({
+                    "mode": "dark",
+                    "palette": {"bg": "rgb(1, 2, 3)"}
+                }))
+                .expect("theme json"),
+                "system"
+            ],
+        )
+        .expect("legacy settings");
+    let settings = read_settings(&connection).expect("settings");
+    assert_eq!(settings.theme_choice, "dark");
+    assert_eq!(settings.locale_choice, "auto");
+    let theme = settings.custom_theme.expect("custom theme");
+    assert_eq!(theme["palette"]["bg"], "rgb(1, 2, 3)");
+    assert!(theme["palette"]["surface"].as_str().is_some());
+    drop(connection);
+    drop(storage);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn custom_theme_rejects_css_injection_values() {
+    let error = super::data::normalize_custom_theme(&serde_json::json!({
+        "mode": "light",
+        "palette": {"bg": "#fff; color: red"}
+    }))
+    .expect_err("unsafe color");
+    assert_eq!(error.code, "THEME_INVALID");
+}
+
+#[test]
+fn verbatim_windows_paths_are_normalized_for_storage_identity() {
+    assert_eq!(
+        super::paths::normalize_verbatim_path(Path::new(r"\\?\C:\data\app.sqlite3")),
+        PathBuf::from(r"C:\data\app.sqlite3")
+    );
+    assert_eq!(
+        super::paths::normalize_verbatim_path(Path::new(r"\\?\UNC\server\share\app.sqlite3")),
+        PathBuf::from(r"\\server\share\app.sqlite3")
+    );
 }

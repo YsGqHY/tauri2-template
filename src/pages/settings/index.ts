@@ -2,7 +2,16 @@ import type { AppSettings, Cleanup, Preferences, StorageStats, StorageTableStats
 import type { Translate } from "../../i18n";
 import { toDisplayError } from "../../api/tauri";
 import { NativeDialogs, PreferencesService, SettingsService, StorageService } from "../../services";
-import { applyTheme, isValidHexColor, lightPalette, type ThemePalette, validateCustomTheme } from "../../theme";
+import {
+  applyTheme,
+  isValidCssColor,
+  isValidHexColor,
+  lightPalette,
+  mergePalette,
+  normalizeCustomTheme,
+  seedCustomTheme,
+  type ThemePalette,
+} from "../../theme";
 import { escapeHtml, formatBytes, on, qs } from "../../shared/dom";
 
 export interface SettingsPageProps {
@@ -18,22 +27,36 @@ export interface SettingsPageProps {
 
 type SettingsTab = "personalization" | "language" | "database";
 
-const paletteKeys: ThemeToken[] = ["bg", "surface", "surfaceRaised", "surfaceMuted", "text", "textMuted", "textSubtle", "border", "accent", "accentStrong", "accentSoft", "success", "warning", "danger", "info", "focus", "sidebar"];
+const paletteKeys: ThemeToken[] = [
+  "bg", "surface", "surfaceRaised", "surfaceMuted", "text", "textMuted", "textSubtle", "border",
+  "accent", "accentStrong", "accentSoft", "success", "warning", "danger", "info", "focus", "sidebar",
+];
 
 export const mountSettingsPage = (container: HTMLElement, props: SettingsPageProps): Cleanup => {
-  let activeTab = (container.dataset.settingsTab as SettingsTab | undefined) ?? "personalization";
+  let activeTab = (container.dataset.activeSettingsTab as SettingsTab | undefined) ?? "personalization";
   let settings = props.settings;
   let preferences = props.preferences;
   let storage: StorageStats | null = null;
   let tableStats: StorageTableStats = { totalBytes: 0, tables: [] };
   let disposed = false;
-  let customMode: ThemeMode = settings.customTheme?.mode ?? "light";
-  let customPalette: ThemePalette = { ...applyTheme(settings.themeChoice, settings.customTheme) };
+  let databaseRequest = 0;
+  let paletteSaveTimer: number | null = null;
+  let paletteRevision = 0;
+  let mutationQueue: Promise<unknown> = Promise.resolve();
+  const seededTheme = seedCustomTheme(settings.themeChoice, settings.customTheme);
+  let customMode: ThemeMode = seededTheme.mode;
+  let customPalette: ThemePalette = { ...seededTheme.palette };
   const busy = new Set<string>();
 
   const errorMessage = (error: unknown): string => {
     const payload = toDisplayError(error, props.t);
     return payload.nextStep ? `${payload.message} ${payload.nextStep}` : payload.message;
+  };
+
+  const enqueue = <T,>(task: () => Promise<T>): Promise<T> => {
+    const next = mutationQueue.catch(() => undefined).then(task);
+    mutationQueue = next.catch(() => undefined);
+    return next;
   };
 
   const setBusy = (key: string, value: boolean): void => {
@@ -56,7 +79,7 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
       return;
     }
     setBusy(key, true);
-    task()
+    enqueue(task)
       .then((value) => {
         if (!disposed) {
           onSuccess(value);
@@ -75,36 +98,36 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
       });
   };
 
-  const refreshDatabase = (): void => {
-    if (disposed || busy.has("refresh")) {
+  const refreshDatabase = async (): Promise<void> => {
+    if (disposed) {
       return;
     }
+    const request = ++databaseRequest;
     setBusy("refresh", true);
-    Promise.all([StorageService.getStats(), StorageService.getTableStats()])
-      .then(([nextStorage, nextTableStats]) => {
-        if (disposed) {
-          return;
-        }
-        storage = nextStorage;
-        tableStats = nextTableStats;
-        if (activeTab === "database") {
-          render();
-        }
-      })
-      .catch((error: unknown) => {
-        if (!disposed) {
-          props.onToast(errorMessage(error), "error");
-        }
-      })
-      .finally(() => {
-        if (!disposed) {
-          setBusy("refresh", false);
-        }
-      });
+    try {
+      const snapshot = await StorageService.getSnapshot();
+      if (disposed || request !== databaseRequest) {
+        return;
+      }
+      storage = snapshot.storage;
+      tableStats = snapshot.tableStats;
+      if (activeTab === "database") {
+        render();
+      }
+    } catch (error: unknown) {
+      if (!disposed && request === databaseRequest) {
+        props.onToast(errorMessage(error), "error");
+      }
+    } finally {
+      if (!disposed && request === databaseRequest) {
+        setBusy("refresh", false);
+      }
+    }
   };
 
   const syncGlobalState = (): void => {
-    props.onRefreshState?.().catch((error: unknown) => {
+    const refresh = props.onRefreshState?.();
+    refresh?.catch((error: unknown) => {
       if (!disposed) {
         props.onToast(errorMessage(error), "error");
       }
@@ -119,7 +142,12 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
       if (payload.code !== "STORAGE_TARGET_EXISTS") {
         throw error;
       }
-      const overwrite = await NativeDialogs.confirm({ title: props.t("settings.overwriteStorageTitle"), message: props.t("settings.overwriteStorageMessage"), okLabel: props.t("common.apply"), cancelLabel: props.t("common.cancel") });
+      const overwrite = await NativeDialogs.confirm({
+        title: props.t("settings.overwriteStorageTitle"),
+        message: props.t("settings.overwriteStorageMessage"),
+        okLabel: props.t("common.apply"),
+        cancelLabel: props.t("common.cancel"),
+      });
       return overwrite ? StorageService.setCustomPath(path, true) : null;
     }
   };
@@ -132,7 +160,12 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
       if (payload.code !== "STORAGE_TARGET_EXISTS") {
         throw error;
       }
-      const overwrite = await NativeDialogs.confirm({ title: props.t("settings.overwriteStorageTitle"), message: props.t("settings.overwriteStorageMessage"), okLabel: props.t("common.apply"), cancelLabel: props.t("common.cancel") });
+      const overwrite = await NativeDialogs.confirm({
+        title: props.t("settings.overwriteStorageTitle"),
+        message: props.t("settings.overwriteStorageMessage"),
+        okLabel: props.t("common.apply"),
+        cancelLabel: props.t("common.cancel"),
+      });
       return overwrite ? StorageService.resetPath(true) : null;
     }
   };
@@ -142,16 +175,91 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
     return translated === table.labelKey ? table.name : translated;
   };
 
+  const readCustomTheme = (): ReturnType<typeof normalizeCustomTheme> => {
+    const name = qs<HTMLInputElement>(container, "[data-palette-name]")?.value.trim() || props.t("settings.defaultPaletteName");
+    return normalizeCustomTheme({ name, mode: customMode, palette: customPalette });
+  };
+
+  const applyCustomPreview = (): void => {
+    const preview = normalizeCustomTheme({ mode: customMode, palette: customPalette });
+    if (preview) {
+      applyTheme("custom", preview);
+    }
+  };
+
+  const persistPalette = (showToast: boolean): void => {
+    const request = paletteRevision;
+    const customTheme = readCustomTheme();
+    if (!customTheme) {
+      if (request === paletteRevision && showToast) {
+        props.onToast(props.t("settings.invalidPalette"), "error");
+      }
+      if (request === paletteRevision) {
+        setBusy("save-palette", false);
+      }
+      return;
+    }
+    setBusy("save-palette", true);
+    enqueue(() => SettingsService.setCustomTheme(customTheme))
+      .then((next) => {
+        if (disposed || request !== paletteRevision) {
+          return;
+        }
+        settings = next;
+        customMode = next.customTheme?.mode ?? customMode;
+        customPalette = { ...mergePalette(customMode, next.customTheme?.palette) };
+        props.onSettingsChange(next);
+        if (showToast) {
+          props.onToast(props.t("common.success"), "success");
+        }
+      })
+      .catch((error: unknown) => {
+        if (!disposed && request === paletteRevision) {
+          props.onToast(errorMessage(error), "error");
+        }
+      })
+      .finally(() => {
+        if (!disposed && request === paletteRevision) {
+          setBusy("save-palette", false);
+        }
+      });
+  };
+
+  const schedulePaletteSave = (): void => {
+    paletteRevision += 1;
+    if (paletteSaveTimer !== null) {
+      window.clearTimeout(paletteSaveTimer);
+    }
+    paletteSaveTimer = window.setTimeout(() => {
+      paletteSaveTimer = null;
+      persistPalette(false);
+    }, 280);
+  };
+
+  const cancelPaletteSave = (): void => {
+    paletteRevision += 1;
+    if (paletteSaveTimer !== null) {
+      window.clearTimeout(paletteSaveTimer);
+      paletteSaveTimer = null;
+    }
+  };
+
   const renderTabs = (): string => `
     <nav class="settings-tabs" aria-label="${escapeHtml(props.t("settings.title"))}">
-      <button class="settings-tab ${activeTab === "personalization" ? "is-active" : ""}" data-settings-tab="personalization"><strong>${props.t("settings.personalization")}</strong><span>${props.t("settings.personalizationDescription")}</span></button>
-      <button class="settings-tab ${activeTab === "language" ? "is-active" : ""}" data-settings-tab="language"><strong>${props.t("settings.language")}</strong><span>${props.t("settings.languageDescription")}</span></button>
-      <button class="settings-tab ${activeTab === "database" ? "is-active" : ""}" data-settings-tab="database"><strong>${props.t("settings.database")}</strong><span>${props.t("settings.databaseDescription")}</span></button>
+      <button type="button" class="settings-tab ${activeTab === "personalization" ? "is-active" : ""}" data-settings-tab="personalization"><strong>${props.t("settings.personalization")}</strong><span>${props.t("settings.personalizationDescription")}</span></button>
+      <button type="button" class="settings-tab ${activeTab === "language" ? "is-active" : ""}" data-settings-tab="language"><strong>${props.t("settings.language")}</strong><span>${props.t("settings.languageDescription")}</span></button>
+      <button type="button" class="settings-tab ${activeTab === "database" ? "is-active" : ""}" data-settings-tab="database"><strong>${props.t("settings.database")}</strong><span>${props.t("settings.databaseDescription")}</span></button>
     </nav>
   `;
 
   const renderPersonalization = (): string => {
-    const choices: Array<[AppSettings["themeChoice"], string]> = [["system", props.t("settings.themeSystem")], ["light", props.t("settings.themeLight")], ["dark", props.t("settings.themeDark")], ["obsidian", props.t("settings.themeObsidian")], ["custom", props.t("settings.themeCustom")]];
+    const choices: Array<[AppSettings["themeChoice"], string]> = [
+      ["system", props.t("settings.themeSystem")],
+      ["light", props.t("settings.themeLight")],
+      ["dark", props.t("settings.themeDark")],
+      ["obsidian", props.t("settings.themeObsidian")],
+      ["custom", props.t("settings.themeCustom")],
+    ];
     return `
       <section class="settings-section">
         <div class="section-heading"><h2>${props.t("settings.themeTitle")}</h2><p>${props.t("settings.themeDescription")}</p></div>
@@ -167,8 +275,8 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
           <label class="choice-row"><input type="radio" name="customMode" value="dark" ${customMode === "dark" ? "checked" : ""}/><span>${props.t("settings.customModeDark")}</span></label>
         </div>
         <div class="palette-grid" data-palette-grid>${paletteKeys.map((token) => `<label class="color-field"><span>${props.t("settings.paletteToken")} · ${escapeHtml(props.t(`settings.palette.${token}`))}</span><input type="text" data-palette-token="${token}" value="${escapeHtml(customPalette[token])}"/><input type="color" aria-label="${escapeHtml(props.t(`settings.palette.${token}`))}" data-palette-color="${token}" value="${isValidHexColor(customPalette[token]) ? customPalette[token] : lightPalette[token]}"/></label>`).join("")}</div>
-        <div class="button-row"><button class="button button--primary" data-busy-key="save-palette" data-save-palette>${props.t("common.save")}</button><button class="button" data-busy-key="reset-palette" data-reset-palette>${props.t("common.reset")}</button></div>
-        <div class="palette-preview" data-palette-preview><span>${props.t("settings.customPaletteTitle")}</span><strong>${escapeHtml(settings.customTheme?.name ?? props.t("settings.themeCustom"))}</strong></div>
+        <div class="button-row"><button type="button" class="button button--primary" data-busy-key="save-palette" data-save-palette>${props.t("common.save")}</button><button type="button" class="button" data-busy-key="reset-palette" data-reset-palette>${props.t("common.reset")}</button></div>
+        <div class="palette-preview" data-palette-preview><span>${props.t("settings.customPaletteTitle")}</span><strong data-palette-preview-name>${escapeHtml(settings.customTheme?.name ?? props.t("settings.themeCustom"))}</strong></div>
       </section>
       <section class="settings-section settings-section--compact">
         <label class="toggle-row"><span>${props.t("settings.showLogo")}</span><input type="checkbox" data-pref="showLogo" ${preferences.showLogo ? "checked" : ""}/></label>
@@ -189,21 +297,25 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
     if (!tableStats.tables.length) {
       return `<div class="empty-state">${props.t("common.noData")}</div>`;
     }
-    const max = Math.max(...tableStats.tables.map((table) => table.rowCount), 1);
-    return tableStats.tables.map((table) => `
+    const maxRows = Math.max(...tableStats.tables.map((table) => table.rowCount), 1);
+    const maxBytes = Math.max(...tableStats.tables.map((table) => table.sizeBytes), 1);
+    return tableStats.tables.map((table) => {
+      const ratio = table.sizeBytes > 0 ? table.sizeBytes / maxBytes : table.rowCount / maxRows;
+      return `
       <div class="table-stat-row">
         <div class="table-stat-row__title"><strong>${escapeHtml(tableLabel(table))}</strong><span>${table.rowCount} ${props.t("settings.rows")} · ${table.estimated ? props.t("settings.estimated") : props.t("settings.exact")}</span></div>
-        <div class="bar-track"><span style="width:${Math.min(100, (table.rowCount / max) * 100)}%"></span></div>
-        <div class="table-stat-row__meta"><span>${formatBytes(table.sizeBytes)}</span>${table.clearable ? `<button class="button button--danger button--small" data-busy-key="clear-table" data-clear-table="${escapeHtml(table.name)}">${props.t("settings.clearTable")}</button>` : `<span class="muted">${props.t("settings.notClearable")}</span>`}</div>
+        <div class="bar-track"><span style="width:${Math.min(100, ratio * 100)}%"></span></div>
+        <div class="table-stat-row__meta"><span>${formatBytes(table.sizeBytes)}</span>${table.clearable ? `<button type="button" class="button button--danger button--small" data-busy-key="clear-table" data-clear-table="${escapeHtml(table.name)}">${props.t("settings.clearTable")}</button>` : `<span class="muted">${props.t("settings.notClearable")}</span>`}</div>
       </div>
-    `).join("");
+    `;
+    }).join("");
   };
 
   const renderDatabase = (): string => `
     <section class="settings-section">
       <div class="section-heading"><h2>${props.t("settings.databaseTitle")}</h2></div>
       <div class="stats-grid"><div class="stat-card"><span>${props.t("settings.currentPath")}</span><strong>${escapeHtml(storage?.path ?? props.t("common.loading"))}</strong></div><div class="stat-card"><span>${props.t("settings.defaultPath")}</span><strong>${escapeHtml(storage?.defaultPath ?? props.t("common.loading"))}</strong></div><div class="stat-card"><span>${props.t("settings.size")}</span><strong>${storage ? formatBytes(storage.sizeBytes) : props.t("common.loading")}</strong></div><div class="stat-card"><span>${props.t("settings.tableCount")}</span><strong>${storage ? tableStats.tables.length : props.t("common.loading")}</strong></div></div>
-      <div class="button-row"><button class="button button--primary" data-busy-key="choose-path" data-choose-path>${props.t("settings.choosePath")}</button><button class="button" data-busy-key="reset-path" data-reset-path>${props.t("settings.resetPath")}</button><button class="button" data-busy-key="refresh" data-refresh-storage>${props.t("common.refresh")}</button></div>
+      <div class="button-row"><button type="button" class="button button--primary" data-busy-key="choose-path" data-choose-path>${props.t("settings.choosePath")}</button><button type="button" class="button" data-busy-key="reset-path" data-reset-path>${props.t("settings.resetPath")}</button><button type="button" class="button" data-busy-key="refresh" data-refresh-storage>${props.t("common.refresh")}</button></div>
     </section>
     <section class="settings-section"><div class="section-heading"><h2>${props.t("settings.tableStats")}</h2><span class="muted">${formatBytes(tableStats.totalBytes)}</span></div><div class="table-stats">${renderTableStats()}</div></section>
   `;
@@ -212,8 +324,44 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
     if (disposed) {
       return;
     }
-    container.dataset.settingsTab = activeTab;
+    container.dataset.activeSettingsTab = activeTab;
     container.innerHTML = `<section class="page page--settings"><div class="page-header"><span class="eyebrow">${props.t("settings.eyebrow")}</span><h1>${props.t("settings.title")}</h1><p>${props.t("settings.description")}</p></div><div class="settings-layout">${renderTabs()}<div class="settings-content">${activeTab === "personalization" ? renderPersonalization() : activeTab === "language" ? renderLanguage() : renderDatabase()}</div></div></section>`;
+  };
+
+  const restoreTheme = (previous: AppSettings, previousPalette: ThemePalette, previousMode: ThemeMode): void => {
+    settings = previous;
+    customPalette = previousPalette;
+    customMode = previousMode;
+    applyTheme(previous.themeChoice, previous.customTheme);
+    render();
+  };
+
+  const handleThemeChoice = (choice: AppSettings["themeChoice"]): void => {
+    const previousSettings = settings;
+    const previousPalette = { ...customPalette };
+    const previousMode = customMode;
+    cancelPaletteSave();
+    if (choice === "custom") {
+      const seeded = readCustomTheme() ?? seedCustomTheme(settings.themeChoice, settings.customTheme);
+      customMode = seeded.mode;
+      customPalette = { ...seeded.palette };
+      applyTheme("custom", seeded);
+      run("theme-choice", () => SettingsService.setCustomTheme(seeded), (next) => {
+        settings = next;
+        props.onSettingsChange(next);
+        render();
+      }, () => restoreTheme(previousSettings, previousPalette, previousMode));
+      return;
+    }
+    applyTheme(choice, settings.customTheme);
+    run("theme-choice", () => SettingsService.setThemeChoice(choice), (next) => {
+      settings = next;
+      const seeded = seedCustomTheme(next.themeChoice, next.customTheme);
+      customMode = seeded.mode;
+      customPalette = { ...seeded.palette };
+      props.onSettingsChange(next);
+      render();
+    }, () => restoreTheme(previousSettings, previousPalette, previousMode));
   };
 
   render();
@@ -222,59 +370,34 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
     if (!(target instanceof HTMLElement) || disposed) {
       return;
     }
-    const tab = target.closest<HTMLElement>("[data-settings-tab]")?.dataset.settingsTab as SettingsTab | undefined;
+    const tab = target.closest<HTMLElement>("button[data-settings-tab]")?.dataset.settingsTab as SettingsTab | undefined;
     if (tab) {
       activeTab = tab;
       render();
       if (tab === "database") {
-        refreshDatabase();
+        void refreshDatabase();
       }
       return;
     }
     if (target.closest("[data-save-palette]")) {
-      if (!paletteKeys.every((key) => isValidHexColor(customPalette[key]))) {
-        props.onToast(props.t("settings.invalidPalette"), "error");
-        return;
-      }
-      const customTheme = { name: qs<HTMLInputElement>(container, "[data-palette-name]")?.value || props.t("settings.defaultPaletteName"), mode: customMode, palette: customPalette };
-      if (!validateCustomTheme(customTheme)) {
-        props.onToast(props.t("settings.invalidPalette"), "error");
-        return;
-      }
-      const previousSettings = settings;
-      const previousPalette = { ...customPalette };
-      const previousMode = customMode;
-      run("save-palette", () => SettingsService.setCustomTheme(customTheme), (next) => {
-        settings = next;
-        customMode = next.customTheme?.mode ?? customMode;
-        props.onSettingsChange(next);
-        props.onToast(props.t("common.success"), "success");
-        render();
-      }, () => {
-        settings = previousSettings;
-        customPalette = previousPalette;
-        customMode = previousMode;
-        applyTheme(previousSettings.themeChoice, previousSettings.customTheme);
-        render();
-      });
+      cancelPaletteSave();
+      paletteRevision += 1;
+      persistPalette(true);
       return;
     }
     if (target.closest("[data-reset-palette]")) {
+      cancelPaletteSave();
       const previousSettings = settings;
       const previousPalette = { ...customPalette };
       const previousMode = customMode;
       run("reset-palette", () => SettingsService.resetCustomTheme(), (next) => {
         settings = next;
-        customPalette = { ...applyTheme(next.themeChoice, next.customTheme) };
+        const seeded = seedCustomTheme(next.themeChoice, next.customTheme);
+        customMode = seeded.mode;
+        customPalette = { ...seeded.palette };
         props.onSettingsChange(next);
         render();
-      }, () => {
-        settings = previousSettings;
-        customPalette = previousPalette;
-        customMode = previousMode;
-        applyTheme(previousSettings.themeChoice, previousSettings.customTheme);
-        render();
-      });
+      }, () => restoreTheme(previousSettings, previousPalette, previousMode));
       return;
     }
     if (target.closest("[data-choose-path]")) {
@@ -282,13 +405,13 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
         return;
       }
       setBusy("choose-path", true);
-      NativeDialogs.saveFile([{ name: props.t("settings.databaseFileFilter"), extensions: ["db", "sqlite", "sqlite3"] }], storage?.path)
+      enqueue(() => NativeDialogs.saveFile([{ name: props.t("settings.databaseFileFilter"), extensions: ["db", "sqlite", "sqlite3"] }], storage?.path))
         .then((path) => path ? setStoragePathWithConfirmation(path) : null)
         .then((next) => {
           if (!disposed && next) {
             storage = next;
             props.onToast(props.t("common.success"), "success");
-            refreshDatabase();
+            void refreshDatabase();
             syncGlobalState();
           }
         })
@@ -309,13 +432,13 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
         return;
       }
       setBusy("reset-path", true);
-      NativeDialogs.confirm({ title: props.t("settings.resetPathConfirmTitle"), message: props.t("settings.resetPathConfirmMessage"), okLabel: props.t("settings.resetPath"), cancelLabel: props.t("common.cancel") })
+      enqueue(() => NativeDialogs.confirm({ title: props.t("settings.resetPathConfirmTitle"), message: props.t("settings.resetPathConfirmMessage"), okLabel: props.t("settings.resetPath"), cancelLabel: props.t("common.cancel") }))
         .then((confirmed) => confirmed ? resetStoragePathWithConfirmation() : null)
         .then((next) => {
           if (!disposed && next) {
             storage = next;
             props.onToast(props.t("common.success"), "success");
-            refreshDatabase();
+            void refreshDatabase();
             syncGlobalState();
           }
         })
@@ -332,7 +455,7 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
       return;
     }
     if (target.closest("[data-refresh-storage]")) {
-      refreshDatabase();
+      void refreshDatabase();
       return;
     }
     const table = target.closest<HTMLElement>("[data-clear-table]")?.dataset.clearTable;
@@ -341,13 +464,13 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
         return;
       }
       setBusy("clear-table", true);
-      NativeDialogs.confirm({ title: props.t("settings.clearConfirmTitle"), message: props.t("settings.clearConfirmMessage"), okLabel: props.t("settings.clearTable"), cancelLabel: props.t("common.cancel") })
+      enqueue(() => NativeDialogs.confirm({ title: props.t("settings.clearConfirmTitle"), message: props.t("settings.clearConfirmMessage"), okLabel: props.t("settings.clearTable"), cancelLabel: props.t("common.cancel") }))
         .then((confirmed) => confirmed ? StorageService.clearTable(table) : null)
         .then((next) => {
           if (!disposed && next) {
             tableStats = next;
             props.onToast(props.t("settings.clearSuccess"), "success");
-            refreshDatabase();
+            void refreshDatabase();
             syncGlobalState();
           }
         })
@@ -370,29 +493,8 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
       return;
     }
     if (target.name === "themeChoice") {
-      const previous = settings;
-      const choice = target.value as AppSettings["themeChoice"];
-      applyTheme(choice, settings.customTheme);
-      const previousPalette = { ...customPalette };
-      const previousMode = customMode;
-      run("theme-choice", () => SettingsService.setThemeChoice(choice), (next) => {
-        settings = next;
-        customPalette = { ...applyTheme(next.themeChoice, next.customTheme) };
-        props.onSettingsChange(next);
-        render();
-      }, () => {
-        settings = previous;
-        customPalette = previousPalette;
-        customMode = previousMode;
-        applyTheme(previous.themeChoice, previous.customTheme);
-        render();
-      });
-      if (busy.has("theme-choice")) {
-        target.closest(".choice-card")?.classList.add("is-pending");
-      }
-      if (previous.themeChoice === choice) {
-        applyTheme(previous.themeChoice, previous.customTheme);
-      }
+      handleThemeChoice(target.value as AppSettings["themeChoice"]);
+      return;
     }
     if (target.name === "localeChoice") {
       const choice = target.value as AppSettings["localeChoice"];
@@ -405,10 +507,14 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
         settings = previous;
         render();
       });
+      return;
     }
     if (target.name === "customMode") {
       customMode = target.value as ThemeMode;
-      applyTheme("custom", { mode: customMode, palette: customPalette });
+      customPalette = { ...mergePalette(customMode, customPalette) };
+      applyCustomPreview();
+      schedulePaletteSave();
+      return;
     }
     const pref = target.dataset.pref as keyof Preferences | undefined;
     if (pref) {
@@ -422,17 +528,7 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
         preferences = previous;
         render();
       });
-    }
-    const paletteToken = target.dataset.paletteToken as ThemeToken | undefined;
-    if (paletteToken) {
-      const value = target.value.trim();
-      customPalette[paletteToken] = value;
-      if (isValidHexColor(value)) {
-        target.classList.remove("is-invalid");
-        applyTheme("custom", { mode: customMode, palette: customPalette });
-      } else {
-        target.classList.add("is-invalid");
-      }
+      return;
     }
     const colorToken = target.dataset.paletteColor as ThemeToken | undefined;
     if (colorToken) {
@@ -441,18 +537,46 @@ export const mountSettingsPage = (container: HTMLElement, props: SettingsPagePro
       if (text) {
         text.value = target.value;
       }
-      applyTheme("custom", { mode: customMode, palette: customPalette });
+      applyCustomPreview();
+      schedulePaletteSave();
+    }
+  });
+
+  const cleanupInput = on(container, "input", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || disposed) {
+      return;
+    }
+    const paletteToken = target.dataset.paletteToken as ThemeToken | undefined;
+    if (paletteToken) {
+      const value = target.value.trim();
+      customPalette[paletteToken] = value;
+      target.classList.toggle("is-invalid", !isValidCssColor(value));
+      if (isValidCssColor(value)) {
+        applyCustomPreview();
+        schedulePaletteSave();
+      }
+      return;
+    }
+    if (target.matches("[data-palette-name]")) {
+      const preview = qs<HTMLElement>(container, "[data-palette-preview-name]");
+      if (preview) {
+        preview.textContent = target.value.trim() || props.t("settings.themeCustom");
+      }
+      schedulePaletteSave();
     }
   });
 
   if (activeTab === "database") {
-    refreshDatabase();
+    void refreshDatabase();
   }
 
   return () => {
     disposed = true;
+    cancelPaletteSave();
     cleanupClick();
     cleanupChange();
+    cleanupInput();
     container.replaceChildren();
   };
 };
