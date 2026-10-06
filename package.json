@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "cleanup:build": "node scripts/clean-build.mjs",
+    "cleanup:build:dry": "node scripts/clean-build.mjs --dry-run",
+    "tauri:build:clean": "pnpm tauri build && pnpm run cleanup:build -- --clean-frontend"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
